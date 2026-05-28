@@ -2,26 +2,15 @@
 #include "ml.h"
 #include <time.h>
 
-float train_data[] = {
-    1, 1, 1, 0, 
-    0, 1, 1, 1, 
-    1, 0, 0, 0, 
-    0, 0, 0, 1,
-};
-
 int main(void) {
+
   srand(time(0));
 
-  Mat td = {
-      .rows = 4,
-      .cols = 4,
-      .es = train_data,
-  };
+  Mat td = ml_load_td("train_data.csv");
+  size_t layer[] = {5, 16, 16, 3};
 
-  size_t layer[] = {2, 4, 2, 6, 2};
-
-  float rate = 1e-2f;
-  size_t epoch = 1000 * 1000;
+  float rate = 1e-1f;
+  size_t epoch = 100 * 1000;
 
   Mod m = ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]));
   Grad g = ml_grad_alloc(m);
@@ -34,7 +23,7 @@ int main(void) {
     ml_model_backprop(m, g, td, dsigmoidf, sigmoidf);
     ml_model_train(m, g, rate);
 
-    if (i % 100 == 0 || i == epoch - 1) {
+    if (i % 1000 == 0 || i == epoch - 1) {
       int bar_width = 50;
       float progress = (float)(i + 1) / (float)epoch;
       int pos = (int)(bar_width * progress);
@@ -62,6 +51,7 @@ int main(void) {
   printf("\n");
 
   ml_model_verify(m, td, sigmoidf);
+  ml_model_save(m, "model.bin");
 
   ml_grad_free(&g);
   ml_model_free(&m);

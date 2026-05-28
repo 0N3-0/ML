@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,15 +50,18 @@ void ml_model_forward(Mod m, Mat in, float (*activate)(float));
 float ml_model_cost(Mod m, Mat td, float (*activate)(float));
 void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps);
 void ml_model_backprop(Mod m, Grad g, Mat td, float (*dactivate)(float),
-                              float (*activate)(float));
+                       float (*activate)(float));
 void ml_model_train(Mod m, Grad g, float rate);
 void ml_model_verify(Mod m, Mat td, float (*activate)(float));
+Mod ml_model_load(const char *file_path);
+void ml_model_save(Mod m, const char *file_path);
 
 Grad ml_grad_alloc(Mod m);
 void ml_grad_free(Grad *g);
 void ml_grad_scale(Grad g, float scale);
 void ml_grad_zero(Grad g);
 
+Mat ml_load_td(const char *file_path);
 #endif // !ML_H_
 
 // #define ML_IMPLEMENTATION
@@ -232,6 +236,7 @@ void ml_model_rand(Mod m, float low, float high) {
 }
 
 void ml_model_print(Mod m) {
+  assert(m.layer_count != 0);
   for (size_t i = 0; i < m.layer_count; ++i) {
     printf("layer %zu:\n", i);
     ml_mat_print(m.w[i], "w");
@@ -278,7 +283,7 @@ float ml_model_cost(Mod m, Mat td, float (*activate)(float)) {
 
 void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps) {
   assert(eps > 0);
-  float c = ml_model_cost(m, td , sigmoidf);
+  float c = ml_model_cost(m, td, sigmoidf);
 
   for (size_t i = 0; i < m.layer_count; ++i) {
     assert(m.w[i].rows == g.w[i].rows);
@@ -287,7 +292,7 @@ void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps) {
       for (size_t k = 0; k < m.w[i].cols; ++k) {
         float save = MAT_AT(m.w[i], j, k);
         MAT_AT(m.w[i], j, k) += eps;
-        MAT_AT(g.w[i], j, k) = (ml_model_cost(m, td ,sigmoidf) - c) / eps;
+        MAT_AT(g.w[i], j, k) = (ml_model_cost(m, td, sigmoidf) - c) / eps;
         MAT_AT(m.w[i], j, k) = save;
       }
     }
@@ -297,7 +302,7 @@ void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps) {
       for (size_t k = 0; k < m.b[i].cols; ++k) {
         float save = MAT_AT(m.b[i], j, k);
         MAT_AT(m.b[i], j, k) += eps;
-        MAT_AT(g.b[i], j, k) = (ml_model_cost(m, td,sigmoidf) - c) / eps;
+        MAT_AT(g.b[i], j, k) = (ml_model_cost(m, td, sigmoidf) - c) / eps;
         MAT_AT(m.b[i], j, k) = save;
       }
     }
@@ -305,7 +310,7 @@ void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps) {
 }
 
 void ml_model_backprop(Mod m, Grad g, Mat td, float (*dactivate)(float),
-                              float (*activate)(float)) {
+                       float (*activate)(float)) {
   assert(m.layer_count > 0);
   ml_grad_zero(g);
 
@@ -385,6 +390,9 @@ void ml_model_verify(Mod m, Mat td, float (*activate)(float)) {
 
   assert(td.cols == input_size + output_size);
 
+  size_t correct = 0;
+  size_t total = 0;
+
   Mat in = {
       .rows = 1,
       .cols = input_size,
@@ -410,12 +418,195 @@ void ml_model_verify(Mod m, Mat td, float (*activate)(float)) {
     }
     printf(" ] ");
 
+    printf("pred: [");
+    for (size_t j = 0; j < output_size; ++j) {
+      float y = MAT_AT(out, 0, j);
+      int pred = y >= 0.5f ? 1 : 0;
+
+      printf(" %d", pred);
+    }
+    printf(" ] ");
+
     printf("expected: [");
     for (size_t j = 0; j < output_size; ++j) {
-      printf(" %f", MAT_AT(td, i, input_size + j));
+      float expected = MAT_AT(td, i, input_size + j);
+      int expect = expected >= 0.5f ? 1 : 0;
+
+      printf(" %d", expect);
     }
-    printf(" ]\n");
+    printf(" ]");
+
+    for (size_t j = 0; j < output_size; ++j) {
+      float y = MAT_AT(out, 0, j);
+      float expected = MAT_AT(td, i, input_size + j);
+
+      int pred = y >= 0.5f ? 1 : 0;
+      int expect = expected >= 0.5f ? 1 : 0;
+
+      if (pred == expect) {
+        correct++;
+      }
+
+      total++;
+    }
+
+    printf("\n");
   }
+
+  printf("accuracy = %zu/%zu = %.2f%%\n", correct, total,
+         100.f * (float)correct / (float)total);
+}
+
+void ml_model_save(Mod m, const char *file_path) {
+  FILE *fd = fopen(file_path, "wb");
+  assert(fd != NULL);
+
+  fwrite("MLMB", 1, 4, fd);
+
+  uint64_t layer_count = (uint64_t)m.layer_count;
+  fwrite(&layer_count, sizeof(layer_count), 1, fd);
+
+  for (size_t i = 0; i < m.layer_count; ++i) {
+    uint64_t w_rows = (uint64_t)m.w[i].rows;
+    uint64_t w_cols = (uint64_t)m.w[i].cols;
+
+    fwrite("W", 1, 1, fd);
+    fwrite(&w_rows, sizeof(w_rows), 1, fd);
+    fwrite(&w_cols, sizeof(w_cols), 1, fd);
+    fwrite(m.w[i].es, sizeof(float), m.w[i].rows * m.w[i].cols, fd);
+
+    uint64_t b_rows = (uint64_t)m.b[i].rows;
+    uint64_t b_cols = (uint64_t)m.b[i].cols;
+
+    fwrite("B", 1, 1, fd);
+    fwrite(&b_rows, sizeof(b_rows), 1, fd);
+    fwrite(&b_cols, sizeof(b_cols), 1, fd);
+    fwrite(m.b[i].es, sizeof(float), m.b[i].rows * m.b[i].cols, fd);
+  }
+
+  fclose(fd);
+}
+
+Mod ml_model_load(const char *file_path) {
+  FILE *fd = fopen(file_path, "rb");
+  assert(fd != NULL);
+
+  char magic[4];
+  size_t nread = fread(magic, 1, 4, fd);
+  assert(nread == 4);
+  assert(memcmp(magic, "MLMB", 4) == 0);
+
+  uint64_t file_layer_count = 0;
+  nread = fread(&file_layer_count, sizeof(file_layer_count), 1, fd);
+  assert(nread == 1);
+  assert(file_layer_count > 0);
+
+  size_t layer_count = (size_t)file_layer_count;
+
+  size_t *layer = malloc((layer_count + 1) * sizeof(*layer));
+  assert(layer != NULL);
+
+  for (size_t i = 0; i < layer_count; ++i) {
+    char type = 0;
+    uint64_t rows = 0;
+    uint64_t cols = 0;
+
+    nread = fread(&type, 1, 1, fd);
+    assert(nread == 1);
+    assert(type == 'W');
+
+    nread = fread(&rows, sizeof(rows), 1, fd);
+    assert(nread == 1);
+
+    nread = fread(&cols, sizeof(cols), 1, fd);
+    assert(nread == 1);
+
+    assert(rows > 0);
+    assert(cols > 0);
+
+    if (i == 0) {
+      layer[0] = (size_t)rows;
+    } else {
+      assert(layer[i] == (size_t)rows);
+    }
+
+    layer[i + 1] = (size_t)cols;
+
+    int seek_result = fseek(fd, (long)(rows * cols * sizeof(float)), SEEK_CUR);
+    assert(seek_result == 0);
+
+    nread = fread(&type, 1, 1, fd);
+    assert(nread == 1);
+    assert(type == 'B');
+
+    nread = fread(&rows, sizeof(rows), 1, fd);
+    assert(nread == 1);
+
+    nread = fread(&cols, sizeof(cols), 1, fd);
+    assert(nread == 1);
+
+    assert(rows == 1);
+    assert(cols == layer[i + 1]);
+
+    seek_result = fseek(fd, (long)(rows * cols * sizeof(float)), SEEK_CUR);
+    assert(seek_result == 0);
+  }
+
+  Mod m = ml_model_alloc(layer, layer_count + 1);
+
+  free(layer);
+
+  rewind(fd);
+
+  nread = fread(magic, 1, 4, fd);
+  assert(nread == 4);
+  assert(memcmp(magic, "MLMB", 4) == 0);
+
+  file_layer_count = 0;
+  nread = fread(&file_layer_count, sizeof(file_layer_count), 1, fd);
+  assert(nread == 1);
+  assert(file_layer_count == m.layer_count);
+
+  for (size_t i = 0; i < m.layer_count; ++i) {
+    char type = 0;
+    uint64_t rows = 0;
+    uint64_t cols = 0;
+
+    nread = fread(&type, 1, 1, fd);
+    assert(nread == 1);
+    assert(type == 'W');
+
+    nread = fread(&rows, sizeof(rows), 1, fd);
+    assert(nread == 1);
+
+    nread = fread(&cols, sizeof(cols), 1, fd);
+    assert(nread == 1);
+
+    assert(rows == m.w[i].rows);
+    assert(cols == m.w[i].cols);
+
+    nread = fread(m.w[i].es, sizeof(float), m.w[i].rows * m.w[i].cols, fd);
+    assert(nread == m.w[i].rows * m.w[i].cols);
+
+    nread = fread(&type, 1, 1, fd);
+    assert(nread == 1);
+    assert(type == 'B');
+
+    nread = fread(&rows, sizeof(rows), 1, fd);
+    assert(nread == 1);
+
+    nread = fread(&cols, sizeof(cols), 1, fd);
+    assert(nread == 1);
+
+    assert(rows == m.b[i].rows);
+    assert(cols == m.b[i].cols);
+
+    nread = fread(m.b[i].es, sizeof(float), m.b[i].rows * m.b[i].cols, fd);
+    assert(nread == m.b[i].rows * m.b[i].cols);
+  }
+
+  fclose(fd);
+  return m;
 }
 
 Grad ml_grad_alloc(Mod m) {
@@ -483,5 +674,112 @@ void ml_grad_zero(Grad g) {
     ml_mat_zero(g.b[i]);
     ml_mat_zero(g.d[i]);
   }
+}
+
+char *read_line_from_file(FILE *fd) {
+  size_t len = 0;
+  size_t cap = 0x20;
+
+  char *line = malloc(cap);
+  assert(line != NULL);
+
+  line[0] = '\0';
+
+  while (fgets(line + len, cap - len, fd) != NULL) {
+    len += strlen(line + len);
+
+    if (len > 0 && line[len - 1] == '\n')
+      return line;
+
+    if (feof(fd))
+      return line;
+
+    cap *= 2;
+
+    char *new_line = realloc(line, cap);
+    assert(new_line != NULL);
+    line = new_line;
+  }
+  free(line);
+  return NULL;
+}
+
+Mat ml_load_td(const char *file_path) {
+  FILE *fd = fopen(file_path, "r");
+  assert(fd != NULL);
+  Mat td = {0};
+
+  char *line = NULL;
+
+  line = read_line_from_file(fd);
+  assert(line != NULL);
+
+  size_t cols = 1;
+  for (char *p = line; *p != '\0'; ++p) {
+    if (*p == ',')
+      cols++;
+  }
+
+  free(line);
+  line = NULL;
+
+  size_t rows = 0;
+
+  while ((line = read_line_from_file(fd)) != NULL) {
+    if (line[0] != '\n' && line[0] != '\0')
+      rows++;
+
+    free(line);
+    line = NULL;
+  }
+
+  assert(rows > 0);
+  assert(cols > 0);
+
+  td = ml_mat_alloc(rows, cols);
+
+  rewind(fd);
+
+  line = read_line_from_file(fd);
+  assert(line != NULL);
+  free(line);
+  line = NULL;
+
+  size_t r = 0;
+
+  while ((line = read_line_from_file(fd)) != NULL) {
+    if (line[0] == '\n' || line[0] == '\0') {
+      free(line);
+      line = NULL;
+      continue;
+    }
+
+    size_t c = 0;
+    char *token = strtok(line, ",\n\r");
+
+    while (token != NULL) {
+      assert(c < cols);
+
+      char *end = NULL;
+      float value = strtof(token, &end);
+
+      assert(end != token);
+
+      MAT_AT(td, r, c) = value;
+
+      c++;
+      token = strtok(NULL, ",\n\r");
+    }
+
+    assert(c == cols);
+    r++;
+    free(line);
+    line = NULL;
+  }
+
+  assert(r == rows);
+
+  fclose(fd);
+  return td;
 }
 #endif // ML_IMPLEMENTATION

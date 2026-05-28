@@ -2,4 +2,4 @@
 
 set -xe
 
-gcc -Wall -Wextra -lm -o ml ml.c
+gcc ml.c -Wall -Wextra -lm -O3 -o ml 
