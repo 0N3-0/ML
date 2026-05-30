@@ -1,8 +1,9 @@
 #ifndef ML_H_
 #define ML_H_
 
-#define MAT_AT(m, i, j) (m).es[(i) * (m).cols + (j)]
+#define MAT_AT(m, i, j) (m).es[(i) * (m).stride + (j)]
 #define MAT_PRINT(m) ml_mat_print(m, #m)
+#define ML_VERIFY_BUF_SIZE 512
 
 #include <assert.h>
 #include <math.h>
@@ -15,6 +16,7 @@
 typedef struct {
   size_t rows;
   size_t cols;
+  size_t stride;
   float *es;
 } Mat;
 
@@ -33,27 +35,29 @@ typedef struct {
   Mat *d;
 } Grad;
 
-Mat ml_mat_alloc(size_t rows, size_t cols);
+Mat ml_mat_alloc(size_t rows, size_t cols, size_t stride);
 void ml_mat_free(Mat *m);
 void ml_mat_print(Mat m, const char *name);
 void ml_mat_rand(Mat m, float low, float high);
 void ml_mat_sum(Mat dst, Mat src);
 void ml_mat_mul(Mat dst, Mat a, Mat b);
+void ml_mat_shuffle(Mat m);
 void ml_mat_scale(Mat m, float scale);
 void ml_mat_zero(Mat m);
 
-Mod ml_model_alloc(size_t *layer_sizes, size_t layer_count);
+Mod ml_model_alloc(size_t *layer_sizes, size_t layer_count, size_t batch_size);
 void ml_model_free(Mod *m);
 void ml_model_rand(Mod m, float low, float high);
 void ml_model_print(Mod m);
 void ml_model_forward(Mod m, Mat in, float (*activate)(float));
 float ml_model_cost(Mod m, Mat td, float (*activate)(float));
-void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps);
-void ml_model_backprop(Mod m, Grad g, Mat td, float (*dactivate)(float),
+void ml_model_finite_diff(Mod m, Grad g, Mat batch, float eps,
+                          float (*activate)(float));
+void ml_model_backprop(Mod m, Grad g, Mat batch, float (*dactivate)(float),
                        float (*activate)(float));
 void ml_model_train(Mod m, Grad g, float rate);
 void ml_model_verify(Mod m, Mat td, float (*activate)(float));
-Mod ml_model_load(const char *file_path);
+Mod ml_model_load(const char *file_path, size_t batch_size);
 void ml_model_save(Mod m, const char *file_path);
 
 Grad ml_grad_alloc(Mod m);
@@ -92,18 +96,39 @@ void ml_act_func(Mat a, Mat z, float (*activate)(float)) {
   }
 }
 
-Mat ml_mat_alloc(size_t rows, size_t cols) {
-  assert(rows > 0);
-  assert(cols > 0);
+Mat ml_mat_alloc(size_t rows, size_t cols, size_t stride) {
+  if (rows == 0 || cols == 0 || stride == 0 || stride < cols) {
+    fprintf(
+        stderr,
+        "ml_mat_alloc: invalid matrix param: rows=%zu, cols=%zu, stride=%zu\n",
+        rows, cols, stride);
+    exit(1);
+  }
 
   Mat m = {
       .rows = rows,
       .cols = cols,
-      .es = (float *)malloc(rows * cols * sizeof(*m.es)),
+      .stride = stride,
+      .es = (float *)malloc(rows * stride * sizeof(*m.es)),
   };
 
   assert(m.es != NULL);
   return m;
+}
+
+Mat ml_mat_slice(Mat m, size_t row, size_t col, size_t rows, size_t cols) {
+  assert(m.es != NULL);
+  assert(row + rows <= m.rows);
+  assert(col + cols <= m.cols);
+
+  Mat v = {
+      .rows = rows,
+      .cols = cols,
+      .stride = m.stride,
+      .es = &MAT_AT(m, row, col),
+  };
+
+  return v;
 }
 
 void ml_mat_free(Mat *m) {
@@ -114,6 +139,7 @@ void ml_mat_free(Mat *m) {
   m->es = NULL;
   m->rows = 0;
   m->cols = 0;
+  m->stride = 0;
 }
 
 void ml_mat_print(Mat m, const char *name) {
@@ -159,11 +185,28 @@ void ml_mat_mul(Mat dst, Mat a, Mat b) {
   }
 }
 
-void ml_mat_scale(Mat m, float scale) {
-  assert(m.rows > 0);
-  assert(m.cols > 0);
-  assert(m.es != NULL);
+void ml_mat_shuffle(Mat m) {
+  if (m.rows == 0 || m.cols == 0 || m.es == NULL) {
+    fprintf(stderr, "ml_mat_shuffle: Matrix is not valid\n");
+    exit(1);
+  }
 
+  for (size_t i = 0; i < m.rows; ++i) {
+    size_t change = i + rand() % (m.rows - i);
+
+    for (size_t j = 0; j < m.cols; ++j) {
+      float tmp = MAT_AT(m, i, j);
+      MAT_AT(m, i, j) = MAT_AT(m, change, j);
+      MAT_AT(m, change, j) = tmp;
+    }
+  }
+}
+
+void ml_mat_scale(Mat m, float scale) {
+  if (m.rows == 0 || m.cols == 0 || m.es == NULL) {
+    fprintf(stderr, "ml_mat_scale: Matrix is not valid\n");
+    exit(1);
+  }
   for (size_t i = 0; i < m.rows; ++i) {
     for (size_t j = 0; j < m.cols; ++j) {
       MAT_AT(m, i, j) *= scale;
@@ -172,14 +215,22 @@ void ml_mat_scale(Mat m, float scale) {
 }
 
 void ml_mat_zero(Mat m) {
-  assert(m.rows > 0);
-  assert(m.cols > 0);
-  assert(m.es != NULL);
-
-  memset(m.es, 0, sizeof(*m.es) * m.rows * m.cols);
+  if (m.rows == 0 || m.cols == 0 || m.es == NULL) {
+    fprintf(stderr, "ml_mat_zero: Matrix is not valid\n");
+    exit(1);
+  }
+  if (m.stride == m.cols) {
+    memset(m.es, 0, sizeof(*m.es) * m.rows * m.cols);
+  } else {
+    for (size_t i = 0; i < m.rows; ++i) {
+      for (size_t j = 0; j < m.cols; ++j) {
+        MAT_AT(m, i, j) = 0;
+      }
+    }
+  }
 }
 
-Mod ml_model_alloc(size_t *layer_sizes, size_t layer_count) {
+Mod ml_model_alloc(size_t *layer_sizes, size_t layer_count, size_t batch_size) {
   assert(layer_count > 1);
   Mod m = {0};
 
@@ -196,10 +247,11 @@ Mod ml_model_alloc(size_t *layer_sizes, size_t layer_count) {
   assert(m.b != NULL);
 
   for (size_t i = 0; i < m.layer_count; ++i) {
-    m.z[i] = ml_mat_alloc(1, layer_sizes[i + 1]);
-    m.w[i] = ml_mat_alloc(layer_sizes[i], layer_sizes[i + 1]);
-    m.a[i] = ml_mat_alloc(1, layer_sizes[i + 1]);
-    m.b[i] = ml_mat_alloc(1, layer_sizes[i + 1]);
+    m.z[i] = ml_mat_alloc(batch_size, layer_sizes[i + 1], layer_sizes[i + 1]);
+    m.w[i] =
+        ml_mat_alloc(layer_sizes[i], layer_sizes[i + 1], layer_sizes[i + 1]);
+    m.a[i] = ml_mat_alloc(batch_size, layer_sizes[i + 1], layer_sizes[i + 1]);
+    m.b[i] = ml_mat_alloc(1, layer_sizes[i + 1], layer_sizes[i + 1]);
   }
 
   return m;
@@ -252,38 +304,40 @@ void ml_model_forward(Mod m, Mat in, float (*activate)(float)) {
       ml_mat_mul(m.z[i], in, m.w[i]);
     else
       ml_mat_mul(m.z[i], m.a[i - 1], m.w[i]);
-    ml_mat_sum(m.z[i], m.b[i]);
+    for (size_t j = 0; j < m.z[i].rows; ++j) {
+      Mat t = ml_mat_slice(m.z[i], j, 0, 1, m.z[i].cols);
+      ml_mat_sum(t, m.b[i]);
+    }
     ml_act_func(m.a[i], m.z[i], activate);
   }
 }
 
-float ml_model_cost(Mod m, Mat td, float (*activate)(float)) {
+float ml_model_cost(Mod m, Mat batch, float (*activate)(float)) {
   float res = 0.f;
 
   size_t input_size = m.w[0].rows;
   size_t output_size = m.a[m.layer_count - 1].cols;
 
-  assert(input_size + output_size == td.cols);
+  assert(input_size + output_size == batch.cols);
 
-  Mat in = {.rows = 1, .cols = input_size, .es = NULL};
+  Mat in = ml_mat_slice(batch, 0, 0, batch.rows, input_size);
+  ml_model_forward(m, in, activate);
+  Mat out = m.a[m.layer_count - 1];
 
-  for (size_t i = 0; i < td.rows; ++i) {
-    in.es = &MAT_AT(td, i, 0);
-    ml_model_forward(m, in, activate);
-    Mat out = m.a[m.layer_count - 1];
-
+  for (size_t i = 0; i < out.rows; ++i) {
     for (size_t j = 0; j < output_size; ++j) {
-      float d = 0.f;
-      d += MAT_AT(td, i, j + input_size) - MAT_AT(out, 0, j);
+      float d = MAT_AT(batch, i, input_size + j) - MAT_AT(out, i, j);
       res += d * d;
     }
   }
-  return res / td.rows / output_size;
+
+  return res / batch.rows / output_size;
 }
 
-void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps) {
+void ml_model_finite_diff(Mod m, Grad g, Mat batch, float eps,
+                          float (*activate)(float)) {
   assert(eps > 0);
-  float c = ml_model_cost(m, td, sigmoidf);
+  float c = ml_model_cost(m, batch, activate);
 
   for (size_t i = 0; i < m.layer_count; ++i) {
     assert(m.w[i].rows == g.w[i].rows);
@@ -292,7 +346,7 @@ void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps) {
       for (size_t k = 0; k < m.w[i].cols; ++k) {
         float save = MAT_AT(m.w[i], j, k);
         MAT_AT(m.w[i], j, k) += eps;
-        MAT_AT(g.w[i], j, k) = (ml_model_cost(m, td, sigmoidf) - c) / eps;
+        MAT_AT(g.w[i], j, k) = (ml_model_cost(m, batch, activate) - c) / eps;
         MAT_AT(m.w[i], j, k) = save;
       }
     }
@@ -302,63 +356,71 @@ void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps) {
       for (size_t k = 0; k < m.b[i].cols; ++k) {
         float save = MAT_AT(m.b[i], j, k);
         MAT_AT(m.b[i], j, k) += eps;
-        MAT_AT(g.b[i], j, k) = (ml_model_cost(m, td, sigmoidf) - c) / eps;
+        MAT_AT(g.b[i], j, k) = (ml_model_cost(m, batch, activate) - c) / eps;
         MAT_AT(m.b[i], j, k) = save;
       }
     }
   }
 }
 
-void ml_model_backprop(Mod m, Grad g, Mat td, float (*dactivate)(float),
+void ml_model_backprop(Mod m, Grad g, Mat batch, float (*dactivate)(float),
                        float (*activate)(float)) {
-  assert(m.layer_count > 0);
+  if (m.layer_count == 0) {
+    fprintf(stderr,
+            "ml_model_backprop : Invalid model : "
+            "layer_count  = %zu",
+            m.layer_count);
+    exit(1);
+  }
   ml_grad_zero(g);
 
   size_t input_size = m.w[0].rows;
   size_t output_size = m.a[m.layer_count - 1].cols;
-  assert(td.cols == input_size + output_size);
+  if (batch.cols != input_size + output_size) {
+    fprintf(stderr,
+            "ml_model_backprop : Invalid input/output layer size of model : "
+            "input = %zu , output = %zu",
+            input_size, output_size);
+    exit(1);
+  }
 
-  Mat in = {
-      .rows = 1,
-      .cols = input_size,
-      .es = NULL,
-  };
+  Mat in = ml_mat_slice(batch, 0, 0, batch.rows, input_size);
+  Mat target = ml_mat_slice(batch, 0, input_size, batch.rows, output_size);
+  ml_model_forward(m, in, activate);
 
-  for (size_t i = 0; i < td.rows; ++i) {
-    in.es = &MAT_AT(td, i, 0);
-    ml_model_forward(m, in, activate);
-
-    for (size_t j = 0; j < m.a[m.layer_count - 1].cols; ++j) {
-      MAT_AT(g.d[m.layer_count - 1], 0, j) =
-          2 *
-          (MAT_AT(m.a[m.layer_count - 1], 0, j) -
-           MAT_AT(td, i, input_size + j)) *
-          dactivate(MAT_AT(m.z[m.layer_count - 1], 0, j));
+  for (size_t i = 0; i < batch.rows; ++i) {
+    for (size_t j = 0; j < output_size; ++j) {
+      MAT_AT(g.d[m.layer_count - 1], i, j) =
+          2 * (MAT_AT(m.a[m.layer_count - 1], i, j) - MAT_AT(target, i, j)) *
+          dactivate(MAT_AT(m.z[m.layer_count - 1], i, j));
     }
+  }
 
-    for (size_t l = m.layer_count - 1; l-- > 0;) {
-
+  for (size_t l = m.layer_count - 1; l-- > 0;) {
+    for (size_t i = 0; i < batch.rows; ++i) {
       for (size_t j = 0; j < m.w[l].cols; ++j) {
         float sum = 0.f;
         for (size_t k = 0; k < m.w[l + 1].cols; ++k) {
-          sum += MAT_AT(g.d[l + 1], 0, k) * MAT_AT(m.w[l + 1], j, k);
+          sum += MAT_AT(g.d[l + 1], i, k) * MAT_AT(m.w[l + 1], j, k);
         }
-        MAT_AT(g.d[l], 0, j) = sum * dactivate(MAT_AT(m.z[l], 0, j));
-      }
-    }
-
-    for (size_t l = m.layer_count; l-- > 0;) {
-      Mat prev = l == 0 ? in : m.a[l - 1];
-      for (size_t j = 0; j < m.w[l].cols; ++j) {
-        for (size_t k = 0; k < m.w[l].rows; ++k) {
-          MAT_AT(g.w[l], k, j) += MAT_AT(prev, 0, k) * MAT_AT(g.d[l], 0, j);
-        }
-        MAT_AT(g.b[l], 0, j) += MAT_AT(g.d[l], 0, j);
+        MAT_AT(g.d[l], i, j) = sum * dactivate(MAT_AT(m.z[l], i, j));
       }
     }
   }
 
-  ml_grad_scale(g, 1.f / (td.rows * output_size));
+  for (size_t l = m.layer_count; l-- > 0;) {
+    Mat prev = l == 0 ? in : m.a[l - 1];
+    for (size_t i = 0; i < batch.rows; ++i) {
+      for (size_t j = 0; j < m.w[l].cols; ++j) {
+        for (size_t k = 0; k < m.w[l].rows; ++k) {
+          MAT_AT(g.w[l], k, j) += MAT_AT(prev, i, k) * MAT_AT(g.d[l], i, j);
+        }
+        MAT_AT(g.b[l], 0, j) += MAT_AT(g.d[l], i, j);
+      }
+    }
+  }
+
+  ml_grad_scale(g, 1.f / (batch.rows * output_size));
 }
 
 void ml_model_train(Mod m, Grad g, float rate) {
@@ -382,84 +444,164 @@ void ml_model_train(Mod m, Grad g, float rate) {
   }
 }
 
+static int ml_binary(float x) { return x >= 0.5f ? 1 : 0; }
+
+static void ml_format_vec_float(char *buf, size_t buf_size, Mat m, size_t row,
+                                size_t offset, size_t cols) {
+  size_t n = 0;
+
+  n += snprintf(buf + n, buf_size - n, "[");
+
+  for (size_t j = 0; j < cols && n < buf_size; ++j) {
+    n += snprintf(buf + n, buf_size - n, "%s%.3f", j ? " " : "",
+                  MAT_AT(m, row, offset + j));
+  }
+
+  snprintf(buf + n, buf_size - n, "]");
+}
+
+static void ml_format_vec_binary(char *buf, size_t buf_size, Mat m, size_t row,
+                                 size_t offset, size_t cols) {
+  size_t n = 0;
+
+  n += snprintf(buf + n, buf_size - n, "[");
+
+  for (size_t j = 0; j < cols && n < buf_size; ++j) {
+    n += snprintf(buf + n, buf_size - n, "%s%d", j ? " " : "",
+                  ml_binary(MAT_AT(m, row, offset + j)));
+  }
+
+  snprintf(buf + n, buf_size - n, "]");
+}
+
 void ml_model_verify(Mod m, Mat td, float (*activate)(float)) {
-  assert(m.layer_count > 0);
+  if (m.layer_count == 0) {
+    fprintf(stderr, "ml_model_verify: invalid model: layer_count=%zu\n",
+            m.layer_count);
+    exit(1);
+  }
+
+  if (td.rows == 0 || td.es == NULL) {
+    fprintf(stderr, "ml_model_verify: invalid training data\n");
+    exit(1);
+  }
+
+  if (activate == NULL) {
+    fprintf(stderr, "ml_model_verify: activate function is NULL\n");
+    exit(1);
+  }
 
   size_t input_size = m.w[0].rows;
   size_t output_size = m.a[m.layer_count - 1].cols;
+  size_t batch_size = m.a[m.layer_count - 1].rows;
 
-  assert(td.cols == input_size + output_size);
+  if (td.cols != input_size + output_size) {
+    fprintf(stderr,
+            "ml_model_verify: invalid td shape: td.cols=%zu, expected=%zu\n",
+            td.cols, input_size + output_size);
+    exit(1);
+  }
 
-  size_t correct = 0;
-  size_t total = 0;
+  if (batch_size == 0) {
+    fprintf(stderr, "ml_model_verify: invalid batch_size=0\n");
+    exit(1);
+  }
 
-  Mat in = {
-      .rows = 1,
-      .cols = input_size,
-      .es = NULL,
-  };
+  if (td.rows % batch_size != 0) {
+    fprintf(stderr,
+            "ml_model_verify: td.rows must be divisible by batch_size: "
+            "td.rows=%zu, batch_size=%zu\n",
+            td.rows, batch_size);
+    exit(1);
+  }
 
-  for (size_t i = 0; i < td.rows; ++i) {
-    in.es = &MAT_AT(td, i, 0);
+  size_t correct_outputs = 0;
+  size_t total_outputs = td.rows * output_size;
+
+  size_t correct_samples = 0;
+  size_t wrong_samples = 0;
+
+  for (size_t begin = 0; begin < td.rows; begin += batch_size) {
+    Mat batch = ml_mat_slice(td, begin, 0, batch_size, td.cols);
+    Mat in = ml_mat_slice(batch, 0, 0, batch.rows, input_size);
+    Mat target = ml_mat_slice(batch, 0, input_size, batch.rows, output_size);
 
     ml_model_forward(m, in, activate);
 
     Mat out = m.a[m.layer_count - 1];
 
-    printf("input: [");
-    for (size_t j = 0; j < input_size; ++j) {
-      printf(" %f", MAT_AT(td, i, j));
-    }
-    printf(" ] ");
+    for (size_t i = 0; i < batch.rows; ++i) {
+      int sample_correct = 1;
 
-    printf("output: [");
-    for (size_t j = 0; j < output_size; ++j) {
-      printf(" %f", MAT_AT(out, 0, j));
-    }
-    printf(" ] ");
+      for (size_t j = 0; j < output_size; ++j) {
+        int pred = ml_binary(MAT_AT(out, i, j));
+        int expect = ml_binary(MAT_AT(target, i, j));
 
-    printf("pred: [");
-    for (size_t j = 0; j < output_size; ++j) {
-      float y = MAT_AT(out, 0, j);
-      int pred = y >= 0.5f ? 1 : 0;
-
-      printf(" %d", pred);
-    }
-    printf(" ] ");
-
-    printf("expected: [");
-    for (size_t j = 0; j < output_size; ++j) {
-      float expected = MAT_AT(td, i, input_size + j);
-      int expect = expected >= 0.5f ? 1 : 0;
-
-      printf(" %d", expect);
-    }
-    printf(" ]");
-
-    for (size_t j = 0; j < output_size; ++j) {
-      float y = MAT_AT(out, 0, j);
-      float expected = MAT_AT(td, i, input_size + j);
-
-      int pred = y >= 0.5f ? 1 : 0;
-      int expect = expected >= 0.5f ? 1 : 0;
-
-      if (pred == expect) {
-        correct++;
+        if (pred == expect) {
+          correct_outputs++;
+        } else {
+          sample_correct = 0;
+        }
       }
 
-      total++;
-    }
+      if (sample_correct) {
+        correct_samples++;
+        continue;
+      }
 
-    printf("\n");
+      if (wrong_samples == 0) {
+        printf("wrong predictions:\n");
+        printf("%-5s %-37s %-25s %-13s %-13s\n", "idx", "input", "output",
+               "pred", "expected");
+      }
+
+      wrong_samples++;
+
+      char input_buf[ML_VERIFY_BUF_SIZE];
+      char output_buf[ML_VERIFY_BUF_SIZE];
+      char pred_buf[ML_VERIFY_BUF_SIZE];
+      char expected_buf[ML_VERIFY_BUF_SIZE];
+
+      ml_format_vec_float(input_buf, sizeof(input_buf), in, i, 0, input_size);
+
+      ml_format_vec_float(output_buf, sizeof(output_buf), out, i, 0,
+                          output_size);
+
+      ml_format_vec_binary(pred_buf, sizeof(pred_buf), out, i, 0, output_size);
+
+      ml_format_vec_binary(expected_buf, sizeof(expected_buf), target, i, 0,
+                           output_size);
+
+      printf("%-5zu %-37s %-25s %-13s %-13s\n", begin + i, input_buf,
+             output_buf, pred_buf, expected_buf);
+    }
   }
 
-  printf("accuracy = %zu/%zu = %.2f%%\n", correct, total,
-         100.f * (float)correct / (float)total);
+  if (wrong_samples == 0) {
+    printf("verify: all samples correct.\n");
+  } else {
+    printf("wrong samples: %zu/%zu\n", wrong_samples, td.rows);
+  }
+
+  printf("sample accuracy: %zu/%zu = %.2f%%\n", correct_samples, td.rows,
+         100.f * (float)correct_samples / (float)td.rows);
+
+  printf("output accuracy: %zu/%zu = %.2f%%\n", correct_outputs, total_outputs,
+         100.f * (float)correct_outputs / (float)total_outputs);
 }
 
 void ml_model_save(Mod m, const char *file_path) {
   FILE *fd = fopen(file_path, "wb");
-  assert(fd != NULL);
+  if (fd == NULL) {
+    fprintf(stderr, "ml_model_save: failed to open file: %s\n", file_path);
+    exit(1);
+  }
+
+  if (m.layer_count == 0) {
+    fprintf(stderr, "ml_model_save: invalid model: layer_count = 0\n");
+    fclose(fd);
+    exit(1);
+  }
 
   fwrite("MLMB", 1, 4, fd);
 
@@ -473,7 +615,13 @@ void ml_model_save(Mod m, const char *file_path) {
     fwrite("W", 1, 1, fd);
     fwrite(&w_rows, sizeof(w_rows), 1, fd);
     fwrite(&w_cols, sizeof(w_cols), 1, fd);
-    fwrite(m.w[i].es, sizeof(float), m.w[i].rows * m.w[i].cols, fd);
+
+    for (size_t r = 0; r < m.w[i].rows; ++r) {
+      for (size_t c = 0; c < m.w[i].cols; ++c) {
+        float x = MAT_AT(m.w[i], r, c);
+        fwrite(&x, sizeof(x), 1, fd);
+      }
+    }
 
     uint64_t b_rows = (uint64_t)m.b[i].rows;
     uint64_t b_cols = (uint64_t)m.b[i].cols;
@@ -481,128 +629,290 @@ void ml_model_save(Mod m, const char *file_path) {
     fwrite("B", 1, 1, fd);
     fwrite(&b_rows, sizeof(b_rows), 1, fd);
     fwrite(&b_cols, sizeof(b_cols), 1, fd);
-    fwrite(m.b[i].es, sizeof(float), m.b[i].rows * m.b[i].cols, fd);
+
+    for (size_t r = 0; r < m.b[i].rows; ++r) {
+      for (size_t c = 0; c < m.b[i].cols; ++c) {
+        float x = MAT_AT(m.b[i], r, c);
+        fwrite(&x, sizeof(x), 1, fd);
+      }
+    }
   }
 
   fclose(fd);
 }
 
-Mod ml_model_load(const char *file_path) {
+Mod ml_model_load(const char *file_path, size_t batch_size) {
   FILE *fd = fopen(file_path, "rb");
-  assert(fd != NULL);
+  if (fd == NULL) {
+    fprintf(stderr, "ml_model_load: failed to open file: %s\n", file_path);
+    exit(1);
+  }
+
+  if (batch_size == 0) {
+    fprintf(stderr, "ml_model_load: invalid batch_size = 0\n");
+    fclose(fd);
+    exit(1);
+  }
 
   char magic[4];
   size_t nread = fread(magic, 1, 4, fd);
-  assert(nread == 4);
-  assert(memcmp(magic, "MLMB", 4) == 0);
+  if (nread != 4 || memcmp(magic, "MLMB", 4) != 0) {
+    fprintf(stderr, "ml_model_load: invalid model file magic\n");
+    fclose(fd);
+    exit(1);
+  }
 
   uint64_t file_layer_count = 0;
   nread = fread(&file_layer_count, sizeof(file_layer_count), 1, fd);
-  assert(nread == 1);
-  assert(file_layer_count > 0);
+  if (nread != 1 || file_layer_count == 0) {
+    fprintf(stderr, "ml_model_load: invalid layer_count\n");
+    fclose(fd);
+    exit(1);
+  }
 
   size_t layer_count = (size_t)file_layer_count;
 
   size_t *layer = malloc((layer_count + 1) * sizeof(*layer));
-  assert(layer != NULL);
+  if (layer == NULL) {
+    fprintf(stderr, "ml_model_load: failed to allocate layer array\n");
+    fclose(fd);
+    exit(1);
+  }
 
+  /*
+    第一遍：只读取形状，恢复 layer[]。
+  */
   for (size_t i = 0; i < layer_count; ++i) {
     char type = 0;
     uint64_t rows = 0;
     uint64_t cols = 0;
 
     nread = fread(&type, 1, 1, fd);
-    assert(nread == 1);
-    assert(type == 'W');
+    if (nread != 1 || type != 'W') {
+      fprintf(stderr, "ml_model_load: expected W at layer %zu\n", i);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&rows, sizeof(rows), 1, fd);
-    assert(nread == 1);
+    if (nread != 1) {
+      fprintf(stderr, "ml_model_load: failed to read W rows at layer %zu\n", i);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&cols, sizeof(cols), 1, fd);
-    assert(nread == 1);
+    if (nread != 1) {
+      fprintf(stderr, "ml_model_load: failed to read W cols at layer %zu\n", i);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
-    assert(rows > 0);
-    assert(cols > 0);
+    if (rows == 0 || cols == 0) {
+      fprintf(stderr, "ml_model_load: invalid W shape at layer %zu: %zux%zu\n",
+              i, (size_t)rows, (size_t)cols);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
     if (i == 0) {
       layer[0] = (size_t)rows;
-    } else {
-      assert(layer[i] == (size_t)rows);
+    } else if (layer[i] != (size_t)rows) {
+      fprintf(stderr,
+              "ml_model_load: W input mismatch at layer %zu: "
+              "expected %zu, got %zu\n",
+              i, layer[i], (size_t)rows);
+      free(layer);
+      fclose(fd);
+      exit(1);
     }
 
     layer[i + 1] = (size_t)cols;
 
-    int seek_result = fseek(fd, (long)(rows * cols * sizeof(float)), SEEK_CUR);
-    assert(seek_result == 0);
+    if (fseek(fd, (long)(rows * cols * sizeof(float)), SEEK_CUR) != 0) {
+      fprintf(stderr, "ml_model_load: failed to skip W data at layer %zu\n", i);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&type, 1, 1, fd);
-    assert(nread == 1);
-    assert(type == 'B');
+    if (nread != 1 || type != 'B') {
+      fprintf(stderr, "ml_model_load: expected B at layer %zu\n", i);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&rows, sizeof(rows), 1, fd);
-    assert(nread == 1);
+    if (nread != 1) {
+      fprintf(stderr, "ml_model_load: failed to read B rows at layer %zu\n", i);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&cols, sizeof(cols), 1, fd);
-    assert(nread == 1);
+    if (nread != 1) {
+      fprintf(stderr, "ml_model_load: failed to read B cols at layer %zu\n", i);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
-    assert(rows == 1);
-    assert(cols == layer[i + 1]);
+    if (rows != 1 || (size_t)cols != layer[i + 1]) {
+      fprintf(stderr,
+              "ml_model_load: invalid B shape at layer %zu: "
+              "got %zux%zu, expected 1x%zu\n",
+              i, (size_t)rows, (size_t)cols, layer[i + 1]);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
 
-    seek_result = fseek(fd, (long)(rows * cols * sizeof(float)), SEEK_CUR);
-    assert(seek_result == 0);
+    if (fseek(fd, (long)(rows * cols * sizeof(float)), SEEK_CUR) != 0) {
+      fprintf(stderr, "ml_model_load: failed to skip B data at layer %zu\n", i);
+      free(layer);
+      fclose(fd);
+      exit(1);
+    }
   }
 
-  Mod m = ml_model_alloc(layer, layer_count + 1);
-
+  Mod m = ml_model_alloc(layer, layer_count + 1, batch_size);
   free(layer);
 
   rewind(fd);
 
   nread = fread(magic, 1, 4, fd);
-  assert(nread == 4);
-  assert(memcmp(magic, "MLMB", 4) == 0);
+  if (nread != 4 || memcmp(magic, "MLMB", 4) != 0) {
+    fprintf(stderr, "ml_model_load: invalid magic on second read\n");
+    ml_model_free(&m);
+    fclose(fd);
+    exit(1);
+  }
 
   file_layer_count = 0;
   nread = fread(&file_layer_count, sizeof(file_layer_count), 1, fd);
-  assert(nread == 1);
-  assert(file_layer_count == m.layer_count);
+  if (nread != 1 || (size_t)file_layer_count != m.layer_count) {
+    fprintf(stderr,
+            "ml_model_load: layer_count mismatch: file=%zu, model=%zu\n",
+            (size_t)file_layer_count, m.layer_count);
+    ml_model_free(&m);
+    fclose(fd);
+    exit(1);
+  }
 
+  /*
+    第二遍：真正读取 W/B 数据。
+  */
   for (size_t i = 0; i < m.layer_count; ++i) {
     char type = 0;
     uint64_t rows = 0;
     uint64_t cols = 0;
 
     nread = fread(&type, 1, 1, fd);
-    assert(nread == 1);
-    assert(type == 'W');
+    if (nread != 1 || type != 'W') {
+      fprintf(stderr, "ml_model_load: expected W at layer %zu\n", i);
+      ml_model_free(&m);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&rows, sizeof(rows), 1, fd);
-    assert(nread == 1);
+    if (nread != 1) {
+      fprintf(stderr, "ml_model_load: failed to read W rows at layer %zu\n", i);
+      ml_model_free(&m);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&cols, sizeof(cols), 1, fd);
-    assert(nread == 1);
+    if (nread != 1) {
+      fprintf(stderr, "ml_model_load: failed to read W cols at layer %zu\n", i);
+      ml_model_free(&m);
+      fclose(fd);
+      exit(1);
+    }
 
-    assert(rows == m.w[i].rows);
-    assert(cols == m.w[i].cols);
+    if ((size_t)rows != m.w[i].rows || (size_t)cols != m.w[i].cols) {
+      fprintf(stderr,
+              "ml_model_load: W shape mismatch at layer %zu: "
+              "file=%zux%zu, model=%zux%zu\n",
+              i, (size_t)rows, (size_t)cols, m.w[i].rows, m.w[i].cols);
+      ml_model_free(&m);
+      fclose(fd);
+      exit(1);
+    }
 
-    nread = fread(m.w[i].es, sizeof(float), m.w[i].rows * m.w[i].cols, fd);
-    assert(nread == m.w[i].rows * m.w[i].cols);
+    for (size_t r = 0; r < m.w[i].rows; ++r) {
+      for (size_t c = 0; c < m.w[i].cols; ++c) {
+        float x = 0.f;
+        nread = fread(&x, sizeof(x), 1, fd);
+        if (nread != 1) {
+          fprintf(stderr, "ml_model_load: failed to read W data at layer %zu\n",
+                  i);
+          ml_model_free(&m);
+          fclose(fd);
+          exit(1);
+        }
+
+        MAT_AT(m.w[i], r, c) = x;
+      }
+    }
 
     nread = fread(&type, 1, 1, fd);
-    assert(nread == 1);
-    assert(type == 'B');
+    if (nread != 1 || type != 'B') {
+      fprintf(stderr, "ml_model_load: expected B at layer %zu\n", i);
+      ml_model_free(&m);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&rows, sizeof(rows), 1, fd);
-    assert(nread == 1);
+    if (nread != 1) {
+      fprintf(stderr, "ml_model_load: failed to read B rows at layer %zu\n", i);
+      ml_model_free(&m);
+      fclose(fd);
+      exit(1);
+    }
 
     nread = fread(&cols, sizeof(cols), 1, fd);
-    assert(nread == 1);
+    if (nread != 1) {
+      fprintf(stderr, "ml_model_load: failed to read B cols at layer %zu\n", i);
+      ml_model_free(&m);
+      fclose(fd);
+      exit(1);
+    }
 
-    assert(rows == m.b[i].rows);
-    assert(cols == m.b[i].cols);
+    if ((size_t)rows != m.b[i].rows || (size_t)cols != m.b[i].cols) {
+      fprintf(stderr,
+              "ml_model_load: B shape mismatch at layer %zu: "
+              "file=%zux%zu, model=%zux%zu\n",
+              i, (size_t)rows, (size_t)cols, m.b[i].rows, m.b[i].cols);
+      ml_model_free(&m);
+      fclose(fd);
+      exit(1);
+    }
 
-    nread = fread(m.b[i].es, sizeof(float), m.b[i].rows * m.b[i].cols, fd);
-    assert(nread == m.b[i].rows * m.b[i].cols);
+    for (size_t r = 0; r < m.b[i].rows; ++r) {
+      for (size_t c = 0; c < m.b[i].cols; ++c) {
+        float x = 0.f;
+        nread = fread(&x, sizeof(x), 1, fd);
+        if (nread != 1) {
+          fprintf(stderr, "ml_model_load: failed to read B data at layer %zu\n",
+                  i);
+          ml_model_free(&m);
+          fclose(fd);
+          exit(1);
+        }
+
+        MAT_AT(m.b[i], r, c) = x;
+      }
+    }
   }
 
   fclose(fd);
@@ -622,9 +932,9 @@ Grad ml_grad_alloc(Mod m) {
   assert(g.d != NULL);
 
   for (size_t i = 0; i < g.layer_count; ++i) {
-    g.w[i] = ml_mat_alloc(m.w[i].rows, m.w[i].cols);
-    g.b[i] = ml_mat_alloc(m.b[i].rows, m.b[i].cols);
-    g.d[i] = ml_mat_alloc(m.a[i].rows, m.a[i].cols);
+    g.w[i] = ml_mat_alloc(m.w[i].rows, m.w[i].cols, m.w[i].stride);
+    g.b[i] = ml_mat_alloc(m.b[i].rows, m.b[i].cols, m.b[i].stride);
+    g.d[i] = ml_mat_alloc(m.a[i].rows, m.a[i].cols, m.a[i].stride);
   }
 
   return g;
@@ -680,7 +990,7 @@ char *read_line_from_file(FILE *fd) {
   size_t len = 0;
   size_t cap = 0x20;
 
-  char *line = malloc(cap);
+  char *line = (char *)malloc(cap);
   assert(line != NULL);
 
   line[0] = '\0';
@@ -696,7 +1006,7 @@ char *read_line_from_file(FILE *fd) {
 
     cap *= 2;
 
-    char *new_line = realloc(line, cap);
+    char *new_line = (char *)realloc(line, cap);
     assert(new_line != NULL);
     line = new_line;
   }
@@ -736,7 +1046,7 @@ Mat ml_load_td(const char *file_path) {
   assert(rows > 0);
   assert(cols > 0);
 
-  td = ml_mat_alloc(rows, cols);
+  td = ml_mat_alloc(rows, cols, cols);
 
   rewind(fd);
 
