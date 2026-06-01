@@ -9,26 +9,6 @@
 
 Color pixels[WIDTH * HEIGHT];
 
-void ml_model_copy_params(Mod dst, Mod src) {
-  if (dst.layer_count != src.layer_count) {
-    fprintf(stderr, "ml_model_copy_params: layer_count mismatch\n");
-    exit(1);
-  }
-
-  for (size_t l = 0; l < src.layer_count; ++l) {
-    for (size_t i = 0; i < src.w[l].rows; ++i) {
-      for (size_t j = 0; j < src.w[l].cols; ++j) {
-        MAT_AT(dst.w[l], i, j) = MAT_AT(src.w[l], i, j);
-      }
-    }
-
-    for (size_t i = 0; i < src.b[l].rows; ++i) {
-      for (size_t j = 0; j < src.b[l].cols; ++j) {
-        MAT_AT(dst.b[l], i, j) = MAT_AT(src.b[l], i, j);
-      }
-    }
-  }
-}
 
 void render_model(Mod m, Mat in, Color *pixels, int width, int height,
                   int render_size) {
@@ -49,9 +29,9 @@ void render_model(Mod m, Mat in, Color *pixels, int width, int height,
       MAT_AT(in, 0, 0) = xn;
       MAT_AT(in, 0, 1) = yn;
 
-      ml_model_forward(m, in, sigmoidf);
+      ml_model_forward(m, in);
 
-      float p = MAT_AT(m.a[m.layer_count - 1], 0, 0);
+      float p = MAT_AT(m.layer[m.layer_count - 1].a, 0, 0);
 
       if (p < 0.f)
         p = 0.f;
@@ -73,7 +53,8 @@ int main(void) {
 
   Mat td = ml_load_td("train_data.csv");
 
-  size_t layer[] = {2, 28, 28, 1};
+  size_t layer[] = {2, 14, 14, 14, 1};
+  Act acts[] = {ML_RELU, ML_SIGMOID, ML_RELU, ML_SIGMOID};
 
   size_t batch_count = 28;
   size_t batch_size = td.rows / batch_count;
@@ -81,10 +62,10 @@ int main(void) {
   float rate = 1.f;
 
   Mod train_m =
-      ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), batch_size);
+      ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), batch_size, acts);
   Grad g = ml_grad_alloc(train_m);
 
-  Mod show_m = ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), 1);
+  Mod show_m = ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), 1 ,acts);
   Mat render_in = ml_mat_alloc(1, 2, 2);
   ml_model_rand(train_m, -1.f, 1.f);
   ml_model_copy_params(show_m, train_m);
@@ -99,17 +80,17 @@ int main(void) {
   size_t epoch = 0;
   size_t steps_per_frame = 4;
 
-  ml_mat_shuffle(td);
   while (!WindowShouldClose()) {
     float c = 0.f;
     for (size_t s = 0; s < steps_per_frame; ++s) {
+      ml_mat_shuffle(td);
 
       for (size_t j = 0; j < batch_count; ++j) {
         Mat batch = ml_mat_slice(td, j * batch_size, 0, batch_size, td.cols);
 
-        ml_model_backprop(train_m, g, batch, dsigmoidf, sigmoidf);
+        ml_model_backprop(train_m, g, batch);
         ml_model_train(train_m, g, rate);
-        c += ml_model_cost(train_m, batch, sigmoidf);
+        c += ml_model_cost(train_m, batch);
       }
 
       epoch++;
