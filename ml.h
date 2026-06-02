@@ -48,6 +48,8 @@ void ml_model_print(Mod m);
 void ml_model_forward(Mod m, Mat in, float (*activate)(float));
 float ml_model_cost(Mod m, Mat td, float (*activate)(float));
 void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps);
+void ml_model_backprop(Mod m, Grad g, Mat td, float (*dactivate)(float),
+                              float (*activate)(float));
 void ml_model_train(Mod m, Grad g, float rate);
 void ml_model_verify(Mod m, Mat td, float (*activate)(float));
 
@@ -300,6 +302,58 @@ void ml_model_finite_diff(Mod m, Grad g, Mat td, float eps) {
       }
     }
   }
+}
+
+void ml_model_backprop(Mod m, Grad g, Mat td, float (*dactivate)(float),
+                              float (*activate)(float)) {
+  assert(m.layer_count > 0);
+  ml_grad_zero(g);
+
+  size_t input_size = m.w[0].rows;
+  size_t output_size = m.a[m.layer_count - 1].cols;
+  assert(td.cols == input_size + output_size);
+
+  Mat in = {
+      .rows = 1,
+      .cols = input_size,
+      .es = NULL,
+  };
+
+  for (size_t i = 0; i < td.rows; ++i) {
+    in.es = &MAT_AT(td, i, 0);
+    ml_model_forward(m, in, activate);
+
+    for (size_t j = 0; j < m.a[m.layer_count - 1].cols; ++j) {
+      MAT_AT(g.d[m.layer_count - 1], 0, j) =
+          2 *
+          (MAT_AT(m.a[m.layer_count - 1], 0, j) -
+           MAT_AT(td, i, input_size + j)) *
+          dactivate(MAT_AT(m.z[m.layer_count - 1], 0, j));
+    }
+
+    for (size_t l = m.layer_count - 1; l-- > 0;) {
+
+      for (size_t j = 0; j < m.w[l].cols; ++j) {
+        float sum = 0.f;
+        for (size_t k = 0; k < m.w[l + 1].cols; ++k) {
+          sum += MAT_AT(g.d[l + 1], 0, k) * MAT_AT(m.w[l + 1], j, k);
+        }
+        MAT_AT(g.d[l], 0, j) = sum * dactivate(MAT_AT(m.z[l], 0, j));
+      }
+    }
+
+    for (size_t l = m.layer_count; l-- > 0;) {
+      Mat prev = l == 0 ? in : m.a[l - 1];
+      for (size_t j = 0; j < m.w[l].cols; ++j) {
+        for (size_t k = 0; k < m.w[l].rows; ++k) {
+          MAT_AT(g.w[l], k, j) += MAT_AT(prev, 0, k) * MAT_AT(g.d[l], 0, j);
+        }
+        MAT_AT(g.b[l], 0, j) += MAT_AT(g.d[l], 0, j);
+      }
+    }
+  }
+
+  ml_grad_scale(g, 1.f / (td.rows * output_size));
 }
 
 void ml_model_train(Mod m, Grad g, float rate) {

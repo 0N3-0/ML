@@ -21,7 +21,6 @@ int main(void) {
   size_t layer[] = {2, 4, 2, 6, 2};
 
   float rate = 1e-2f;
-  float eps = 1e-3;
   size_t epoch = 1000 * 1000;
 
   Mod m = ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]));
@@ -32,7 +31,7 @@ int main(void) {
   printf("\033[?25l");
 
   for (size_t i = 0; i < epoch; ++i) {
-    ml_model_finite_diff(m, g, td, eps);
+    ml_model_backprop(m, g, td, dsigmoidf, sigmoidf);
     ml_model_train(m, g, rate);
 
     if (i % 100 == 0 || i == epoch - 1) {
