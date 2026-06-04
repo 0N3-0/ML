@@ -3,4 +3,4 @@
 set -xe
 
 gcc ml.c -Wall -Wextra -lm -O3 -o ml 
-gcc model_run.c -Wall -Wextra -lraylib -lm -O3 -o model_run 
+gcc train_visualizer.c -Wall -Wextra -lraylib -lm -O3 -o train_visualizer 

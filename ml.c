@@ -11,27 +11,32 @@ int main(void) {
   size_t layer[] = {2, 28, 28, 1};
   Act acts[] = {ML_SIGMOID, ML_SIGMOID, ML_SIGMOID};
   size_t batch_count = 28;
-  size_t batch_size = td.rows / batch_count;
+  TrainConfig train_config = {
+    .rate = 1.f,
+    .batch_size = td.rows / batch_count,
+    .loss = {
+      .lossf = ml_model_loss_mse,
+      .dlossf = ml_model_loss_dmse,
+    }
+  };
 
-  float rate = 0.5f;
   size_t epoch = 10 * 1000;
 
   Mod m =
-      ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), batch_size, acts);
+      ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), train_config, acts);
   Grad g = ml_grad_alloc(m);
 
-  ml_model_rand(m, -1.f, 1.f);
-
+  ml_model_xavier_rand(m);
   printf("\033[?25l");
 
   for (size_t i = 0; i < epoch; ++i) {
     float c = 0.f;
     for (size_t j = 0; j < batch_count; ++j) {
-      Mat batch = ml_mat_slice(td, batch_size * (j % batch_count), 0,
-                               batch_size, td.cols);
-      ml_model_backprop(m, g, batch);
-      ml_model_train(m, g, rate);
-      c += ml_model_cost(m, batch);
+      Mat batch = ml_mat_slice(td, train_config.batch_size * (j % batch_count), 0,
+                               train_config.batch_size, td.cols);
+      ml_model_backprop(m, g, batch,train_config);
+      ml_model_optimizer(m, g, train_config);
+      c += ml_model_cost(m, batch,train_config);
     }
     if (i % 100 == 0 || i == epoch - 1) {
       int bar_width = 50;
@@ -50,7 +55,7 @@ int main(void) {
         }
       }
 
-      printf("] %3d%%  cost = %f", (int)(progress * 100.f), c / batch_size);
+      printf("] %3d%%  cost = %f", (int)(progress * 100.f), c / train_config.batch_size);
 
       fflush(stdout);
     }

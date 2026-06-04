@@ -3,5 +3,5 @@
 /train_data.csv
 /test
 /train
-/model_run
 /mnist.png
+/train_visualizer

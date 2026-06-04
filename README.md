@@ -4,7 +4,9 @@ A stb-style (for now) ML library built while learning. The Git commit history sh
 
 ## About
 
-ML is a small machine learning library written in C.
+ML is a small machine learning library written in C, inspired by tsoding's videos and project.
+ - https://www.youtube.com/playlist?list=PLpM-Dvs8t0VZPZKggcql-MmjaBdZKeDMw
+ - https://github.com/tsoding/nn.h
 
 This project is not intended to be a production-ready machine learning framework. It is a learning-oriented project where I implement the basic parts of neural networks from scratch.
 
