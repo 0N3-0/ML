@@ -23,7 +23,6 @@
 #define MODEL_X 920
 #define MODEL_Y PANEL_Y
 
-
 Color pixels[RENDER_SIZE * RENDER_SIZE];
 
 float cost_history[COST_CAP];
@@ -136,7 +135,7 @@ int main(void) {
   Mat td = ml_load_td("train_data.csv");
 
   size_t layer[] = {2, 28, 28, 1};
-  Act acts[] = { ML_SIGMOID, ML_SIGMOID, ML_SIGMOID};
+  Act acts[] = {ML_SIGMOID, ML_SIGMOID, ML_SIGMOID};
   size_t batch_count = 28;
   TrainConfig train_config = {.rate = 1.f,
                               .batch_size = td.rows / batch_count,
@@ -173,10 +172,10 @@ int main(void) {
   size_t steps_per_frame = 4;
 
   while (!WindowShouldClose()) {
+    ml_mat_shuffle(td);
     float c = 0.f;
 
     for (size_t s = 0; s < steps_per_frame; ++s) {
-      ml_mat_shuffle(td);
 
       for (size_t j = 0; j < batch_count; ++j) {
         Mat batch = ml_mat_slice(td, j * train_config.batch_size, 0,
@@ -194,9 +193,11 @@ int main(void) {
     float avg_cost = c / (float)(steps_per_frame * batch_count);
     cost_history_push(avg_cost);
 
-    ml_model_copy_params(show_m, train_m);
-    render_model(show_m, render_in, pixels, RENDER_SIZE);
-    UpdateTexture(texture, pixels);
+    if (epoch % 8 == 0) {
+      ml_model_copy_params(show_m, train_m);
+      render_model(show_m, render_in, pixels, RENDER_SIZE);
+      UpdateTexture(texture, pixels);
+    }
 
     BeginDrawing();
     ClearBackground(BLACK);

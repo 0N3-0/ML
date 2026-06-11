@@ -10,29 +10,6 @@ ML is a small machine learning library written in C, inspired by tsoding's video
 
 This project is not intended to be a production-ready machine learning framework. It is a learning-oriented project where I implement the basic parts of neural networks from scratch.
 
-The repository is also meant to be read through its Git history. Each commit represents a different stage of my learning process, from finite difference training to backpropagation, mini-batch training, model serialization, visualization experiments, and later architectural changes.
-
-## Learning Through Commits
-
-The commit history is part of this project.
-
-You can read the commits in order to follow how the library evolved:
-
-```sh
-git log --oneline --reverse
-```
-
-Current learning stages include:
-
-```text
-feat: add finite difference training
-feat: implement backpropagation
-feat: add model serialization and training data import
-feat: add mini-batch training and image training visualization
-refactor: add layer abstraction
-docs: add README.md and LICENSE
-```
-
 ## Current Features
 
 The current version includes:
@@ -50,16 +27,6 @@ The current version includes:
 11. Simple model verification
 12. Image fitting and visualization experiments
 
-## Repository Structure
-
-```text
-.
-├── ml.h                # Main stb-style ML library header
-├── ml.c                # Main training / experiment program
-├── train_visualizer.c  # Raylib-based training visualization experiment
-├── build.sh            # Simple build script
-└── README.md
-```
 
 ## Build
 
@@ -84,41 +51,6 @@ gcc -Wall -Wextra -O3 train_visualizer.c -o train_visualizer -lraylib -lm
 ```
 
 The exact command may depend on your system and installed libraries.
-
-## Usage
-
-The project is still changing, so the API is not stable yet.
-
-A typical usage pattern looks like this:
-
-```c
-#define ML_IMPLEMENTATION
-#include "ml.h"
-
-int main(void) {
-  size_t layers[] = {2, 16, 16, 1};
-
-  Act acts[] = {
-      ML_LRELU,
-      ML_LRELU,
-      ML_SIGMOID,
-  };
-
-  Mod m = ml_model_alloc(layers, sizeof(layers) / sizeof(layers[0]), 1, acts);
-  Grad g = ml_grad_alloc(m);
-
-  ml_model_rand(m, -1.0f, 1.0f);
-
-  // Train or run the model here.
-
-  ml_grad_free(&g);
-  ml_model_free(&m);
-
-  return 0;
-}
-```
-
-The exact API may change as the project evolves.
 
 ## Project Style
 

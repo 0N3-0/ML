@@ -31,18 +31,17 @@ typedef struct {
 
 typedef struct {
   float rate;
-  float eps;
   size_t batch_size;
   Loss loss;
 } TrainConfig;
 
 typedef struct {
-  Mat z;
-  Mat a;
   Mat w;
   Mat b;
+  Mat z;
+  Mat a;
   Act act;
-} ModelLayer;
+} Layer;
 
 typedef struct {
   Mat w;
@@ -52,7 +51,7 @@ typedef struct {
 
 typedef struct {
   size_t layer_count;
-  ModelLayer *layer;
+  Layer *layer;
 } Mod;
 
 typedef struct {
@@ -66,13 +65,14 @@ void ml_mat_print(Mat m, const char *name);
 void ml_mat_rand(Mat m, float low, float high);
 void ml_mat_sum(Mat dst, Mat src);
 void ml_mat_mul(Mat dst, Mat a, Mat b);
+void ml_mat_tran(Mat dst, Mat b);
 void ml_mat_shuffle(Mat m);
 void ml_mat_scale(Mat m, float scale);
 void ml_mat_zero(Mat m);
 
-ModelLayer ml_modellayer_alloc(size_t cur_layer_size, size_t pre_layer_size,
-                               size_t batch_size, Act act);
-void ml_modellayer_free(ModelLayer *layer);
+Layer ml_modellayer_alloc(size_t cur_layer_size, size_t pre_layer_size,
+                          size_t batch_size, Act act);
+void ml_modellayer_free(Layer *layer);
 
 Mod ml_model_alloc(size_t *layer_sizes, size_t layer_count,
                    TrainConfig train_config, Act *acts);
@@ -86,7 +86,8 @@ void ml_model_loss_dmse(Mat dst, Mat target, Mat output);
 void ml_model_print(Mod m);
 void ml_model_forward(Mod m, Mat in);
 float ml_model_cost(Mod m, Mat batch, TrainConfig train_config);
-void ml_model_finite_diff(Mod m, Grad g, Mat batch, TrainConfig train_config);
+void ml_model_finite_diff(Mod m, Grad g, Mat batch, TrainConfig train_config,
+                          float eps);
 void ml_model_backprop(Mod m, Grad g, Mat batch, TrainConfig train_config);
 void ml_model_optimizer(Mod m, Grad g, TrainConfig train_config);
 void ml_model_verify(Mod m, Mat td);
@@ -234,6 +235,16 @@ void ml_mat_mul(Mat dst, Mat a, Mat b) {
   }
 }
 
+void ml_mat_tran(Mat dst, Mat b) {
+  assert(dst.cols == b.rows && dst.rows == b.cols);
+  assert(dst.es != NULL && b.es != NULL);
+  for (size_t i = 0; i < b.rows; ++i) {
+    for (size_t j = 0; j < b.cols; ++j) {
+      MAT_AT(dst, j, i) = MAT_AT(b, i, j);
+    }
+  }
+}
+
 void ml_mat_mul_elem(Mat dst, Mat a, Mat b) {
   assert(a.cols == b.cols && a.rows == b.rows);
   assert(dst.rows == a.rows && dst.cols == a.cols);
@@ -302,9 +313,9 @@ void ml_mat_zero(Mat m) {
   }
 }
 
-ModelLayer ml_modellayer_alloc(size_t cur_layer_size, size_t pre_layer_size,
-                               size_t batch_size, Act act) {
-  ModelLayer layer = {0};
+Layer ml_modellayer_alloc(size_t cur_layer_size, size_t pre_layer_size,
+                          size_t batch_size, Act act) {
+  Layer layer = {0};
   if (act.f == NULL || act.df == NULL) {
     fprintf(stderr, "ml_modellayer_alloc : Invalid activate function");
     exit(1);
@@ -319,7 +330,7 @@ ModelLayer ml_modellayer_alloc(size_t cur_layer_size, size_t pre_layer_size,
   return layer;
 }
 
-void ml_modellayer_free(ModelLayer *layer) {
+void ml_modellayer_free(Layer *layer) {
 
   ml_mat_free(&layer->z);
   ml_mat_free(&layer->w);
@@ -337,7 +348,7 @@ Mod ml_model_alloc(size_t *layer_sizes, size_t layer_count,
 
   m.layer_count = layer_count - 1;
 
-  m.layer = (ModelLayer *)malloc(m.layer_count * sizeof(*m.layer));
+  m.layer = (Layer *)malloc(m.layer_count * sizeof(*m.layer));
 
   for (size_t i = 0; i < m.layer_count; ++i) {
     m.layer[i] = ml_modellayer_alloc(layer_sizes[i + 1], layer_sizes[i],
@@ -484,29 +495,26 @@ float ml_model_cost(Mod m, Mat batch, TrainConfig train_config) {
   return res;
 }
 
-void ml_model_finite_diff(Mod m, Grad g, Mat batch, TrainConfig train_config) {
+void ml_model_finite_diff(Mod m, Grad g, Mat batch, TrainConfig train_config,
+                          float eps) {
   float c = ml_model_cost(m, batch, train_config);
 
   for (size_t i = 0; i < m.layer_count; ++i) {
-    assert(m.layer[i].w.rows == g.layer[i].w.rows);
-    assert(m.layer[i].w.cols == g.layer[i].w.cols);
     for (size_t j = 0; j < m.layer[i].w.rows; ++j) {
       for (size_t k = 0; k < m.layer[i].w.cols; ++k) {
         float save = MAT_AT(m.layer[i].w, j, k);
-        MAT_AT(m.layer[i].w, j, k) += train_config.eps;
+        MAT_AT(m.layer[i].w, j, k) += eps;
         MAT_AT(g.layer[i].w, j, k) =
-            (ml_model_cost(m, batch, train_config) - c) / train_config.eps;
+            (ml_model_cost(m, batch, train_config) - c) / eps;
         MAT_AT(m.layer[i].w, j, k) = save;
       }
     }
-    assert(m.layer[i].b.rows == g.layer[i].b.rows);
-    assert(m.layer[i].b.cols == g.layer[i].b.cols);
     for (size_t j = 0; j < m.layer[i].b.rows; ++j) {
       for (size_t k = 0; k < m.layer[i].b.cols; ++k) {
         float save = MAT_AT(m.layer[i].b, j, k);
-        MAT_AT(m.layer[i].b, j, k) += train_config.eps;
+        MAT_AT(m.layer[i].b, j, k) += eps;
         MAT_AT(g.layer[i].b, j, k) =
-            (ml_model_cost(m, batch, train_config) - c) / train_config.eps;
+            (ml_model_cost(m, batch, train_config) - c) / eps;
         MAT_AT(m.layer[i].b, j, k) = save;
       }
     }
@@ -549,32 +557,30 @@ void ml_model_backprop(Mod m, Grad g, Mat batch, TrainConfig train_config) {
   ml_mat_free(&tmp);
 
   for (size_t l = m.layer_count - 1; l-- > 0;) {
-    for (size_t i = 0; i < batch.rows; ++i) {
-      for (size_t j = 0; j < m.layer[l].w.cols; ++j) {
-        float sum = 0.f;
-        for (size_t k = 0; k < m.layer[l + 1].w.cols; ++k) {
-          sum +=
-              MAT_AT(g.layer[l + 1].d, i, k) * MAT_AT(m.layer[l + 1].w, j, k);
-        }
-        MAT_AT(g.layer[l].d, i, j) =
-            sum * m.layer[l].act.df(MAT_AT(m.layer[l].z, i, j));
-      }
-    }
+    Mat wT = ml_mat_alloc(m.layer[l + 1].w.cols, m.layer[l + 1].w.rows,
+                          m.layer[l + 1].w.rows);
+    ml_mat_tran(wT, m.layer[l + 1].w);
+    ml_mat_mul(g.layer[l].d, g.layer[l + 1].d, wT);
+    Mat tmp =
+        ml_mat_alloc(m.layer[l].z.rows, m.layer[l].z.cols, m.layer[l].z.stride);
+    ml_mat_apply(tmp, m.layer[l].z, m.layer[l].act.df);
+    ml_mat_mul_elem(g.layer[l].d, g.layer[l].d, tmp);
+    ml_mat_free(&wT);
+    ml_mat_free(&tmp);
   }
 
   for (size_t l = m.layer_count; l-- > 0;) {
     Mat prev = l == 0 ? in : m.layer[l - 1].a;
+    Mat prevT = ml_mat_alloc(prev.cols, prev.rows,prev.rows);
+    ml_mat_tran(prevT, prev);
+    ml_mat_mul(g.layer[l].w, prevT, g.layer[l].d);
     for (size_t i = 0; i < batch.rows; ++i) {
       for (size_t j = 0; j < m.layer[l].w.cols; ++j) {
-        for (size_t k = 0; k < m.layer[l].w.rows; ++k) {
-          MAT_AT(g.layer[l].w, k, j) +=
-              MAT_AT(prev, i, k) * MAT_AT(g.layer[l].d, i, j);
-        }
         MAT_AT(g.layer[l].b, 0, j) += MAT_AT(g.layer[l].d, i, j);
       }
     }
+    ml_mat_free(&prevT);
   }
-
 }
 
 void ml_model_optimizer(Mod m, Grad g, TrainConfig train_config) {
@@ -983,7 +989,7 @@ Mod ml_model_load(const char *file_path, TrainConfig train_config, Act *acts) {
     uint64_t rows = 0;
     uint64_t cols = 0;
 
-    ModelLayer *ly = &m.layer[i];
+    Layer *ly = &m.layer[i];
 
     nread = fread(&type, 1, 1, fd);
     if (nread != 1 || type != 'W') {
