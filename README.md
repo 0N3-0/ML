@@ -5,8 +5,9 @@ A stb-style (for now) ML library built while learning. The Git commit history sh
 ## About
 
 ML is a small machine learning library written in C, inspired by tsoding's videos and project.
- - https://www.youtube.com/playlist?list=PLpM-Dvs8t0VZPZKggcql-MmjaBdZKeDMw
- - https://github.com/tsoding/nn.h
+
+- https://www.youtube.com/playlist?list=PLpM-Dvs8t0VZPZKggcql-MmjaBdZKeDMw
+- https://github.com/tsoding/nn.h
 
 This project is not intended to be a production-ready machine learning framework. It is a learning-oriented project where I implement the basic parts of neural networks from scratch.
 
@@ -27,6 +28,24 @@ The current version includes:
 11. Simple model verification
 12. Image fitting and visualization experiments
 
+## Logging
+
+Define `ML_LOG_LEVEL` before including `ml.h` to control log output:
+
+| Level | Output | Usage |
+|---|---|---|
+| `0` | none (zero overhead) | Release builds |
+| `1` | `LOG_ERROR` | Production (default) |
+| `2` | + `LOG_WARN` | Tuning |
+| `3` | + `LOG_INFO` | Training progress |
+| `4` | + `LOG_DEBUG` | Debugging |
+
+example:
+```sh
+gcc -DML_LOG_LEVEL=3 ml.c -o ml -lm
+```
+
+Without `-D`, defaults to level 1.
 
 ## Build
 

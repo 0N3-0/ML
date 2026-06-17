@@ -133,32 +133,82 @@ int main(void) {
   srand(time(0));
 
   Mat td = ml_load_td("train_data.csv");
+  if (td.es == NULL) {
+    LOG_ERROR("failed to load training data");
+    return 1;
+  }
 
   size_t layer[] = {2, 28, 28, 1};
   Act acts[] = {ML_SIGMOID, ML_SIGMOID, ML_SIGMOID};
   size_t batch_count = 28;
-  TrainConfig train_config = {.rate = 1.f,
-                              .batch_size = td.rows / batch_count,
-                              .loss = {
-                                  .lossf = ml_model_loss_mse,
-                                  .dlossf = ml_model_loss_dmse,
-                              }};
+  TrainConfig train_config = {
+    .rate = 1.f,
+    .batch_size = td.rows / batch_count,
+    .loss = {
+      .lossf = ml_model_loss_mse,
+      .dlossf = ml_model_loss_dmse,
+    }
+  };
 
-  TrainConfig train_config_show = {.rate = 1.f,
-                                   .batch_size = 1,
-                                   .loss = {
-                                       .lossf = ml_model_loss_mse,
-                                       .dlossf = ml_model_loss_dmse,
-                                   }};
-  Mod train_m = ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]),
-                               train_config, acts);
+  TrainConfig train_config_show = {
+    .rate = 1.f,
+    .batch_size = 1,
+    .loss = {
+      .lossf = ml_model_loss_mse,
+      .dlossf = ml_model_loss_dmse,
+    }
+  };
+
+  Mod train_m =
+    ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), train_config, acts);
+  if (train_m.layer == NULL) {
+    LOG_ERROR("failed to allocate train model");
+    ml_mat_free(&td);
+    return 1;
+  }
+
   Grad g = ml_grad_alloc(train_m);
+  if (g.layer == NULL) {
+    LOG_ERROR("failed to allocate gradients");
+    ml_model_free(&train_m);
+    ml_mat_free(&td);
+    return 1;
+  }
 
-  Mod show_m = ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]),
-                              train_config_show, acts);
+  Mod show_m = ml_model_alloc(
+    layer,
+    sizeof(layer) / sizeof(layer[0]),
+    train_config_show,
+    acts
+  );
+  if (show_m.layer == NULL) {
+    LOG_ERROR("failed to allocate show model");
+    ml_grad_free(&g);
+    ml_model_free(&train_m);
+    ml_mat_free(&td);
+    return 1;
+  }
+
   Mat render_in = ml_mat_alloc(1, 2, 2);
+  if (render_in.es == NULL) {
+    LOG_ERROR("failed to allocate render input matrix");
+    ml_model_free(&show_m);
+    ml_grad_free(&g);
+    ml_model_free(&train_m);
+    ml_mat_free(&td);
+    return 1;
+  }
 
-  ml_model_xavier_rand(train_m);
+  if (ml_model_xavier_rand(train_m) != 0) {
+    LOG_ERROR("failed to initialize model weights");
+    ml_mat_free(&render_in);
+    ml_model_free(&show_m);
+    ml_grad_free(&g);
+    ml_model_free(&train_m);
+    ml_mat_free(&td);
+    return 1;
+  }
+
   ml_model_copy_params(show_m, train_m);
 
   InitWindow(WIDTH, HEIGHT, "ML Training Visualizer");
@@ -171,6 +221,8 @@ int main(void) {
   size_t epoch = 0;
   size_t steps_per_frame = 4;
 
+  bool window_open = true;
+
   while (!WindowShouldClose()) {
     ml_mat_shuffle(td);
     float c = 0.f;
@@ -178,11 +230,22 @@ int main(void) {
     for (size_t s = 0; s < steps_per_frame; ++s) {
 
       for (size_t j = 0; j < batch_count; ++j) {
-        Mat batch = ml_mat_slice(td, j * train_config.batch_size, 0,
-                                 train_config.batch_size, td.cols);
+        Mat batch = ml_mat_slice(
+          td,
+          j * train_config.batch_size,
+          0,
+          train_config.batch_size,
+          td.cols
+        );
 
-        ml_model_backprop(train_m, g, batch, train_config);
-        ml_model_optimizer(train_m, g, train_config);
+        if (ml_model_backprop(train_m, g, batch, train_config) != 0) {
+          LOG_ERROR("backprop failed at epoch %zu", epoch);
+          goto cleanup;
+        }
+        if (ml_model_optimizer(train_m, g, train_config) != 0) {
+          LOG_ERROR("optimizer failed at epoch %zu", epoch);
+          goto cleanup;
+        }
 
         c += ml_model_cost(train_m, batch, train_config);
       }
@@ -205,32 +268,60 @@ int main(void) {
     DrawText(TextFormat("epoch: %zu", epoch), GRAPH_X, 50, 26, WHITE);
     DrawText(TextFormat("cost: %.6f", avg_cost), GRAPH_X, 86, 26, WHITE);
 
-    draw_cost_graph(cost_history, cost_count, GRAPH_X, GRAPH_Y, GRAPH_W,
-                    GRAPH_H);
+    draw_cost_graph(
+      cost_history,
+      cost_count,
+      GRAPH_X,
+      GRAPH_Y,
+      GRAPH_W,
+      GRAPH_H
+    );
 
-    DrawText("model output", MODEL_X + MODEL_VIEW_SIZE / 2 - 90, MODEL_Y - 42,
-             28, WHITE);
+    DrawText(
+      "model output",
+      MODEL_X + MODEL_VIEW_SIZE / 2 - 90,
+      MODEL_Y - 42,
+      28,
+      WHITE
+    );
 
-    DrawTextureEx(texture, (Vector2){MODEL_X, MODEL_Y}, 0.f, (float)MODEL_SCALE,
-                  WHITE);
+    DrawTextureEx(
+      texture,
+      (Vector2){MODEL_X, MODEL_Y},
+      0.f,
+      (float)MODEL_SCALE,
+      WHITE
+    );
 
-    DrawRectangleLines(MODEL_X, MODEL_Y, MODEL_VIEW_SIZE, MODEL_VIEW_SIZE,
-                       DARKGRAY);
+    DrawRectangleLines(
+      MODEL_X,
+      MODEL_Y,
+      MODEL_VIEW_SIZE,
+      MODEL_VIEW_SIZE,
+      DARKGRAY
+    );
 
     EndDrawing();
   }
 
+  window_open = false;
   UnloadTexture(texture);
+  CloseWindow();
 
-  ml_model_save(train_m, "model.bin");
+  if (ml_model_save(train_m, "model.bin") != 0) {
+    LOG_ERROR("failed to save model");
+  }
 
+cleanup:
+  if (window_open) {
+    UnloadTexture(texture);
+    CloseWindow();
+  }
   ml_grad_free(&g);
   ml_model_free(&train_m);
   ml_model_free(&show_m);
   ml_mat_free(&render_in);
   ml_mat_free(&td);
-
-  CloseWindow();
 
   return 0;
 }
