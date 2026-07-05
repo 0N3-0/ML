@@ -6,30 +6,27 @@ int main(void) {
 
   srand(time(0));
 
-  Mat td = ml_load_td("train_data.csv");
+  Mat td = ml_data_load_bin("train_1k.bin");
   if (td.es == NULL) {
     LOG_ERROR("failed to load training data");
     return 1;
   }
 
-  ml_mat_shuffle(td);
-
-  size_t layer[] = {2, 28, 28, 1};
-  Act acts[] = {ML_SIGMOID, ML_SIGMOID, ML_SIGMOID};
-  size_t batch_count = 28;
+  size_t layer[] = {784, 128, 64, 10};
+  Act acts[] = {ML_LRELU, ML_LRELU, ML_LINEAR};
+  size_t batch_count = 20;
   TrainConfig train_config = {
-    .rate = 1.f,
+    .rate = 0.01f,
     .batch_size = td.rows / batch_count,
     .loss = {
-      .lossf = ml_model_loss_mse,
-      .dlossf = ml_model_loss_dmse,
+      .lossf = ml_model_loss_softmax_cce,
+      .dlossf = ml_model_loss_dsoftmax_cce,
     }
   };
 
-  size_t epoch = 10 * 1000;
+  size_t epoch = 1000;
 
-  Mod m =
-      ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), train_config, acts);
+  Mod m = ml_model_alloc(layer, sizeof(layer) / sizeof(layer[0]), train_config, acts);
   if (m.layer == NULL) {
     LOG_ERROR("failed to allocate model");
     ml_mat_free(&td);
@@ -55,10 +52,16 @@ int main(void) {
   printf("\033[?25l");
 
   for (size_t i = 0; i < epoch; ++i) {
+    ml_mat_shuffle(td);
     float c = 0.f;
     for (size_t j = 0; j < batch_count; ++j) {
-      Mat batch = ml_mat_slice(td, train_config.batch_size * (j % batch_count), 0,
-                               train_config.batch_size, td.cols);
+      Mat batch = ml_mat_slice(
+        td,
+        train_config.batch_size * (j % batch_count),
+        0,
+        train_config.batch_size,
+        td.cols
+      );
       if (ml_model_backprop(m, g, batch, train_config) != 0) {
         LOG_ERROR("backprop failed at epoch %zu, batch %zu", i, j);
         goto cleanup;
@@ -69,7 +72,7 @@ int main(void) {
       }
       c += ml_model_cost(m, batch, train_config);
     }
-    if (i % 100 == 0 || i == epoch - 1) {
+    if (i % 10 == 0 || i == epoch - 1) {
       int bar_width = 50;
       float progress = (float)(i + 1) / (float)epoch;
       int pos = (int)(bar_width * progress);
@@ -86,7 +89,7 @@ int main(void) {
         }
       }
 
-      printf("] %3d%%  cost = %f", (int)(progress * 100.f), c / train_config.batch_size);
+      printf("] %3d%%  cost = %f", (int)(progress * 100.f), c / batch_count);
 
       fflush(stdout);
     }

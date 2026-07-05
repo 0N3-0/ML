@@ -118,6 +118,10 @@ float dGeLUf(float x);                                                         /
 float dtanhf(float x);                                                         // derivative of tanh
 float swishf(float x);                                                         // swish activation
 float dswishf(float x);                                                        // derivative of swish
+float linearf(float x);                                                        // linear activation (identity)
+float dlinearf(float x);                                                       // derivative of linear
+
+int softmaxf(Mat dst, Mat src);                                                // softmax activation
 
 Mat ml_mat_alloc(size_t rows, size_t cols, size_t stride);                     // allocate matrix, returns {0} on failure
 void ml_mat_free(Mat *m);                                                      // free matrix
@@ -174,13 +178,23 @@ float ml_model_loss_sse(Mat target, Mat output);                               /
 void ml_model_loss_dsse(Mat dst, Mat target, Mat output);                      // derivative of SSE loss
 float ml_model_loss_mse(Mat target, Mat output);                               // mean squared error
 void ml_model_loss_dmse(Mat dst, Mat target, Mat output);                      // derivative of MSE loss
+float ml_model_loss_bce(Mat target, Mat output);                               // binary cross-entropy loss
+void ml_model_loss_dbce(Mat dst, Mat target, Mat output);                      // derivative of BCE loss
+float ml_model_loss_cce(Mat target, Mat output);                               // categorical cross-entropy loss
+void ml_model_loss_dcce(Mat dst, Mat target, Mat output);                      // derivative of CCE loss
+float ml_model_loss_softmax_cce(Mat target, Mat output);                       // softmax + categorical cross-entropy loss
+void ml_model_loss_dsoftmax_cce(Mat dst, Mat target, Mat output);              // derivative of softmax + CCE loss
+
 
 int ml_model_verify(Mod m, Mat td);                                            // evaluate model accuracy on labeled data
 
 Mod ml_model_load(const char *file_path, TrainConfig train_config, Act *acts); // load model from binary file, returns {0} on failure
 int ml_model_save(Mod m, const char *file_path);                               // save model to binary file, returns non-zero on failure
 
-Mat ml_load_td(const char *file_path);                                         // load training data from CSV file, returns {0} on failure
+Mat ml_data_load_bin(const char *file_path);                                   // load binary data file, returns {0} on failure
+Mat ml_data_load_csv(const char *file_path);                                   // load CSV data file, returns {0} on failure
+Mat ml_label_onehot_alloc(const int *labels, size_t n, size_t num_classes);    // convert sparse labels to one-hot matrix
+size_t ml_label_argmax(const float *row, size_t n);                            // index of maximum element
 void ml_model_copy_params(Mod dst, Mod src);                                   // copy weights and biases from src model to dst model
 
 // clang-format on
@@ -240,6 +254,7 @@ Act ML_LRELU = {.f = LReLUf, .df = dLReLUf};
 Act ML_TANH = {.f = tanhf, .df = dtanhf};
 Act ML_GELU = {.f = GeLUf, .df = dGeLUf};
 Act ML_SWISH = {.f = swishf, .df = dswishf};
+Act ML_LINEAR = {.f = linearf, .df = dlinearf};
 
 float rand_float(void) {
   return (float)rand() / (float)RAND_MAX;
@@ -293,6 +308,15 @@ float dswishf(float x) {
   return s + x * s * (1.f - s);
 }
 
+float linearf(float x) {
+  return x;
+}
+
+float dlinearf(float x) {
+  (void)x;
+  return 1.f;
+}
+
 float dtanhf(float x) {
   return 1 - (tanhf(x) * tanhf(x));
 }
@@ -306,7 +330,7 @@ float dGeLUf(float x) {
 }
 
 int softmaxf(Mat dst, Mat src) {
-  if(dst.es == NULL || src .es == NULL){
+  if (dst.es == NULL || src.es == NULL) {
     LOG_ERROR("dst/src is NULL");
   }
   for (size_t i = 0; i < src.rows; ++i) {
@@ -634,6 +658,7 @@ int ml_model_xavier_rand(Mod m) {
     float limit = sqrtf(6.f / (float)(rows + cols));
 
     ml_mat_rand(m.layer[i].w, -limit, limit);
+    ml_mat_zero(m.layer[i].b);
   }
 
   return 0;
@@ -759,6 +784,163 @@ void ml_model_loss_dmse(Mat dst, Mat target, Mat output) {
   for (size_t i = 0; i < output.rows; ++i) {
     for (size_t j = 0; j < output_size; ++j) {
       MAT_AT(dst, i, j) = 2.f * (MAT_AT(output, i, j) - MAT_AT(target, i, input_size + j)) * scale;
+    }
+  }
+}
+
+float ml_model_loss_bce(Mat target, Mat output) {
+  if (output.rows == 0 || output.cols == 0) {
+    LOG_ERROR("invalid output matrix: output = %zux%zu", output.rows, output.cols);
+    return NAN;
+  }
+
+  if (target.rows != output.rows || target.cols < output.cols) {
+    LOG_ERROR(
+      "invalid loss input: target = %zux%zu, output = %zux%zu",
+      target.rows,
+      target.cols,
+      output.rows,
+      output.cols
+    );
+    return NAN;
+  }
+
+  size_t output_size = output.cols;
+  size_t input_size = target.cols - output_size;
+  const float eps = 1e-7;
+
+  float res = 0.f;
+  for (size_t i = 0; i < target.rows; ++i) {
+    for (size_t j = 0; j < output_size; ++j) {
+      float p = eps > MAT_AT(output, i, j) ? eps : MAT_AT(output, i, j);
+      float mp = eps > (1 - MAT_AT(output, i, j)) ? eps : (1 - MAT_AT(output, i, j));
+      res +=
+        -(MAT_AT(target, i, input_size + j) * logf(p) +
+          (1.f - MAT_AT(target, i, input_size + j)) * logf(mp));
+    }
+  }
+
+  return res / (float)(output.rows * output.cols);
+}
+
+void ml_model_loss_dbce(Mat dst, Mat target, Mat output) {
+  size_t output_size = output.cols;
+  size_t input_size = target.cols - output_size;
+  const float eps = 1e-7;
+  float scale = 1.f / (float)(output.rows * output.cols);
+
+  for (size_t i = 0; i < output.rows; ++i) {
+    for (size_t j = 0; j < output_size; ++j) {
+      float p = eps > MAT_AT(output, i, j) ? eps : MAT_AT(output, i, j);
+      float mp = eps > (1 - MAT_AT(output, i, j)) ? eps : (1 - MAT_AT(output, i, j));
+      MAT_AT(dst, i, j) =
+        (-MAT_AT(target, i, input_size + j) / p + (1.f - MAT_AT(target, i, input_size + j)) / mp) *
+        scale;
+    }
+  }
+}
+
+float ml_model_loss_cce(Mat target, Mat output) {
+  if (output.rows == 0 || output.cols == 0) {
+    LOG_ERROR("invalid output matrix: output = %zux%zu", output.rows, output.cols);
+    return NAN;
+  }
+
+  if (target.rows != output.rows || target.cols < output.cols) {
+    LOG_ERROR(
+      "invalid loss input: target = %zux%zu, output = %zux%zu",
+      target.rows,
+      target.cols,
+      output.rows,
+      output.cols
+    );
+    return NAN;
+  }
+
+  size_t output_size = output.cols;
+  size_t input_size = target.cols - output_size;
+  const float eps = 1e-7;
+
+  float res = 0.f;
+  for (size_t i = 0; i < target.rows; ++i) {
+    for (size_t j = 0; j < output_size; ++j) {
+      float p = eps > MAT_AT(output, i, j) ? eps : MAT_AT(output, i, j);
+      res += -MAT_AT(target, i, input_size + j) * logf(p);
+    }
+  }
+
+  return res / (float)output.rows;
+}
+
+void ml_model_loss_dcce(Mat dst, Mat target, Mat output) {
+  size_t output_size = output.cols;
+  size_t input_size = target.cols - output_size;
+  float scale = 1.f / (float)output.rows;
+  const float eps = 1e-7;
+
+  for (size_t i = 0; i < target.rows; ++i) {
+    for (size_t j = 0; j < output_size; ++j) {
+      float p = eps > MAT_AT(output, i, j) ? eps : MAT_AT(output, i, j);
+      MAT_AT(dst, i, j) = -MAT_AT(target, i, input_size + j) / p * scale;
+    }
+  }
+}
+
+float ml_model_loss_softmax_cce(Mat target, Mat output) {
+  if (output.rows == 0 || output.cols == 0) {
+    LOG_ERROR("invalid output matrix: output = %zux%zu", output.rows, output.cols);
+    return NAN;
+  }
+
+  if (target.rows != output.rows || target.cols < output.cols) {
+    LOG_ERROR(
+      "invalid loss input: target = %zux%zu, output = %zux%zu",
+      target.rows,
+      target.cols,
+      output.rows,
+      output.cols
+    );
+    return NAN;
+  }
+
+  size_t output_size = output.cols;
+  size_t input_size = target.cols - output_size;
+  const float eps = 1e-7;
+
+  float res = 0.f;
+  for (size_t i = 0; i < target.rows; ++i) {
+    float max = MAT_AT(output, i, 0);
+    for (size_t j = 1; j < output_size; ++j) {
+      if (MAT_AT(output, i, j) > max)
+        max = MAT_AT(output, i, j);
+    }
+
+    float sum = 0.f;
+    for (size_t j = 0; j < output_size; ++j) {
+      sum += expf(MAT_AT(output, i, j) - max);
+    }
+
+    for (size_t j = 0; j < output_size; ++j) {
+      float p = expf(MAT_AT(output, i, j) - max) / sum;
+      if (p < eps)
+        p = eps;
+      res += -MAT_AT(target, i, input_size + j) * logf(p);
+    }
+  }
+
+  return res / (float)output.rows;
+}
+
+void ml_model_loss_dsoftmax_cce(Mat dst, Mat target, Mat output) {
+  size_t output_size = output.cols;
+  size_t input_size = target.cols - output_size;
+  float scale = 1.f / (float)output.rows;
+
+  softmaxf(dst, output);
+
+  for (size_t i = 0; i < target.rows; ++i) {
+    for (size_t j = 0; j < output_size; ++j) {
+      MAT_AT(dst, i, j) = (MAT_AT(dst, i, j) - MAT_AT(target, i, input_size + j)) * scale;
     }
   }
 }
@@ -985,6 +1167,19 @@ ml_format_vec_binary(char *buf, size_t buf_size, Mat m, size_t row, size_t offse
   snprintf(buf + n, buf_size - n, "]");
 }
 
+static void
+ml_format_vec_argmax(char *buf, size_t buf_size, Mat m, size_t row, size_t offset, size_t cols) {
+  size_t best = offset;
+  float best_val = MAT_AT(m, row, offset);
+  for (size_t j = offset + 1; j < offset + cols; ++j) {
+    if (MAT_AT(m, row, j) > best_val) {
+      best_val = MAT_AT(m, row, j);
+      best = j;
+    }
+  }
+  snprintf(buf, buf_size, "%zu", best - offset);
+}
+
 int ml_model_verify(Mod m, Mat td) {
   if (m.layer_count == 0) {
     LOG_ERROR("invalid model: layer_count=%zu", m.layer_count);
@@ -1020,8 +1215,7 @@ int ml_model_verify(Mod m, Mat td) {
     return 1;
   }
 
-  size_t correct_outputs = 0;
-  size_t total_outputs = td.rows * output_size;
+  int multi_class = output_size > 1;
 
   size_t correct_samples = 0;
   size_t wrong_samples = 0;
@@ -1038,14 +1232,23 @@ int ml_model_verify(Mod m, Mat td) {
     for (size_t i = 0; i < batch.rows; ++i) {
       int sample_correct = 1;
 
-      for (size_t j = 0; j < output_size; ++j) {
-        int pred = ml_binary(MAT_AT(out, i, j));
-        int expect = ml_binary(MAT_AT(target, i, j));
+      if (multi_class) {
+        size_t pred_idx = ml_label_argmax(&MAT_AT(out, i, 0), output_size);
+        size_t target_idx = ml_label_argmax(&MAT_AT(target, i, 0), output_size);
 
-        if (pred == expect) {
-          correct_outputs++;
-        } else {
+        if (MAT_AT(target, i, target_idx) != 1.0f) {
           sample_correct = 0;
+        } else if (pred_idx != target_idx) {
+          sample_correct = 0;
+        }
+      } else {
+        for (size_t j = 0; j < output_size; ++j) {
+          int pred = ml_binary(MAT_AT(out, i, j));
+          int expect = ml_binary(MAT_AT(target, i, j));
+          if (pred != expect) {
+            sample_correct = 0;
+            break;
+          }
         }
       }
 
@@ -1070,9 +1273,13 @@ int ml_model_verify(Mod m, Mat td) {
 
       ml_format_vec_float(output_buf, sizeof(output_buf), out, i, 0, output_size);
 
-      ml_format_vec_binary(pred_buf, sizeof(pred_buf), out, i, 0, output_size);
-
-      ml_format_vec_binary(expected_buf, sizeof(expected_buf), target, i, 0, output_size);
+      if (multi_class) {
+        ml_format_vec_argmax(pred_buf, sizeof(pred_buf), out, i, 0, output_size);
+        ml_format_vec_argmax(expected_buf, sizeof(expected_buf), target, i, 0, output_size);
+      } else {
+        ml_format_vec_binary(pred_buf, sizeof(pred_buf), out, i, 0, output_size);
+        ml_format_vec_binary(expected_buf, sizeof(expected_buf), target, i, 0, output_size);
+      }
 
       LOG_WARN(
         "%-5zu %-37s %-25s %-13s %-13s",
@@ -1098,15 +1305,7 @@ int ml_model_verify(Mod m, Mat td) {
     100.f * (float)correct_samples / (float)td.rows
   );
 
-  LOG_INFO(
-    "output accuracy: %zu/%zu = %.2f%%",
-    correct_outputs,
-    total_outputs,
-    100.f * (float)correct_outputs / (float)total_outputs
-  );
   (void)correct_samples;
-  (void)correct_outputs;
-  (void)total_outputs;
   return 0;
 }
 
@@ -1622,17 +1821,49 @@ char *read_line_from_file(FILE *fd) {
   return NULL;
 }
 
-Mat ml_load_td(const char *file_path) {
+static size_t csv_parse_row(const char *line, float *out, size_t max_cols) {
+  size_t c = 0;
+  const char *p = line;
+
+  while (*p && c < max_cols) {
+    while (*p == ' ' || *p == '\t')
+      p++;
+    if (*p == '\0' || *p == '\n' || *p == '\r')
+      break;
+
+    char *end;
+    float v = strtof(p, &end);
+    if (end == p || !isfinite(v))
+      return 0;
+
+    out[c++] = v;
+    p = end;
+
+    while (*p == ' ' || *p == '\t')
+      p++;
+    if (*p == ',') {
+      p++;
+      continue;
+    }
+    break;
+  }
+
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+    p++;
+  if (*p != '\0')
+    return 0;
+
+  return c;
+}
+
+Mat ml_data_load_csv(const char *file_path) {
   FILE *fd = fopen(file_path, "r");
   if (fd == NULL) {
     LOG_ERROR("failed to open file: %s", file_path);
     return (Mat){0};
   }
-  Mat td = {0};
 
-  char *line = NULL;
-
-  line = read_line_from_file(fd);
+  char *line = read_line_from_file(fd);
   if (line == NULL) {
     LOG_ERROR("failed to read header line");
     fclose(fd);
@@ -1640,113 +1871,149 @@ Mat ml_load_td(const char *file_path) {
   }
 
   size_t cols = 1;
-  for (char *p = line; *p != '\0'; ++p) {
+  for (char *p = line; *p; ++p) {
     if (*p == ',')
       cols++;
   }
-
   free(line);
-  line = NULL;
 
+  size_t cap = 1024;
   size_t rows = 0;
-
-  while ((line = read_line_from_file(fd)) != NULL) {
-    if (line[0] != '\n' && line[0] != '\0')
-      rows++;
-
-    free(line);
-    line = NULL;
-  }
-
-  if (rows == 0) {
-    LOG_ERROR("no data rows found");
+  float *data = (float *)malloc(cap * cols * sizeof(float));
+  if (data == NULL) {
+    LOG_ERROR("failed to allocate data buffer");
     fclose(fd);
     return (Mat){0};
   }
-  if (cols == 0) {
-    LOG_ERROR("no data columns found");
-    fclose(fd);
-    return (Mat){0};
-  }
-
-  td = ml_mat_alloc(rows, cols, cols);
-  if (td.es == NULL) {
-    LOG_ERROR("failed to allocate matrix");
-    fclose(fd);
-    return (Mat){0};
-  }
-
-  rewind(fd);
-
-  line = read_line_from_file(fd);
-  if (line == NULL) {
-    LOG_ERROR("failed to re-read header line");
-    ml_mat_free(&td);
-    fclose(fd);
-    return (Mat){0};
-  }
-  free(line);
-  line = NULL;
-
-  size_t r = 0;
 
   while ((line = read_line_from_file(fd)) != NULL) {
     if (line[0] == '\n' || line[0] == '\0') {
       free(line);
-      line = NULL;
       continue;
     }
 
-    size_t c = 0;
-    char *token = strtok(line, ",\n\r");
-
-    while (token != NULL) {
-      if (c >= cols) {
-        LOG_ERROR("too many columns at row %zu", r);
+    if (rows >= cap) {
+      cap *= 2;
+      float *new_data = (float *)realloc(data, cap * cols * sizeof(float));
+      if (new_data == NULL) {
+        LOG_ERROR("failed to reallocate data buffer at row %zu", rows);
+        free(data);
         free(line);
-        ml_mat_free(&td);
         fclose(fd);
         return (Mat){0};
       }
-
-      char *end = NULL;
-      float value = strtof(token, &end);
-
-      if (end == token) {
-        LOG_ERROR("failed to parse float at row %zu, col %zu", r, c);
-        free(line);
-        ml_mat_free(&td);
-        fclose(fd);
-        return (Mat){0};
-      }
-
-      MAT_AT(td, r, c) = value;
-
-      c++;
-      token = strtok(NULL, ",\n\r");
+      data = new_data;
     }
 
-    if (c != cols) {
-      LOG_ERROR("wrong number of columns at row %zu: expected %zu, got %zu", r, cols, c);
+    if (csv_parse_row(line, data + rows * cols, cols) != cols) {
+      LOG_ERROR("failed to parse row %zu", rows);
+      free(data);
       free(line);
-      ml_mat_free(&td);
       fclose(fd);
       return (Mat){0};
     }
-    r++;
+
+    rows++;
+
+#if ML_LOG_LEVEL >= 3
+    if (rows % 10000 == 0)
+      LOG_INFO("loaded %zu rows...", rows);
+#endif
+
     free(line);
-    line = NULL;
   }
 
-  if (r != rows) {
-    LOG_ERROR("wrong number of rows: expected %zu, got %zu", rows, r);
-    ml_mat_free(&td);
+  fclose(fd);
+
+  if (rows == 0) {
+    LOG_ERROR("no data rows found");
+    free(data);
+    return (Mat){0};
+  }
+
+  Mat m = ml_mat_alloc(rows, cols, cols);
+  if (m.es == NULL) {
+    free(data);
+    return (Mat){0};
+  }
+
+  memcpy(m.es, data, rows * cols * sizeof(float));
+  free(data);
+
+  LOG_INFO("loaded %zux%zu from %s", m.rows, m.cols, file_path);
+  return m;
+}
+
+Mat ml_data_load_bin(const char *file_path) {
+  FILE *fd = fopen(file_path, "rb");
+  if (fd == NULL) {
+    LOG_ERROR("failed to open file: %s", file_path);
+    return (Mat){0};
+  }
+
+  char magic[4];
+  if (fread(magic, 1, 4, fd) != 4 || memcmp(magic, "MLDB", 4) != 0) {
+    LOG_ERROR("invalid binary data file: %s", file_path);
+    fclose(fd);
+    return (Mat){0};
+  }
+
+  uint64_t rows = 0, cols = 0;
+  if (fread(&rows, sizeof(rows), 1, fd) != 1 || rows == 0) {
+    LOG_ERROR("invalid rows in %s", file_path);
+    fclose(fd);
+    return (Mat){0};
+  }
+  if (fread(&cols, sizeof(cols), 1, fd) != 1 || cols == 0) {
+    LOG_ERROR("invalid cols in %s", file_path);
+    fclose(fd);
+    return (Mat){0};
+  }
+
+  Mat m = ml_mat_alloc((size_t)rows, (size_t)cols, (size_t)cols);
+  if (m.es == NULL) {
+    fclose(fd);
+    return (Mat){0};
+  }
+
+  size_t count = (size_t)rows * (size_t)cols;
+  if (fread(m.es, sizeof(float), count, fd) != count) {
+    LOG_ERROR("failed to read data from %s", file_path);
+    ml_mat_free(&m);
     fclose(fd);
     return (Mat){0};
   }
 
   fclose(fd);
-  return td;
+
+  LOG_INFO("loaded %zux%zu from %s", m.rows, m.cols, file_path);
+  return m;
+}
+
+Mat ml_label_onehot_alloc(const int *labels, size_t n, size_t num_classes) {
+  Mat m = ml_mat_alloc(n, num_classes, num_classes);
+  if (m.es == NULL)
+    return (Mat){0};
+
+  for (size_t i = 0; i < n; i++) {
+    for (size_t j = 0; j < num_classes; j++)
+      MAT_AT(m, i, j) = 0.0f;
+    if (labels[i] >= 0 && (size_t)labels[i] < num_classes)
+      MAT_AT(m, i, (size_t)labels[i]) = 1.0f;
+  }
+  return m;
+}
+
+size_t ml_label_argmax(const float *row, size_t n) {
+  size_t best = 0;
+  float best_val = row[0];
+  for (size_t i = 1; i < n; i++) {
+    if (row[i] > best_val) {
+      best_val = row[i];
+      best = i;
+    }
+  }
+  return best;
 }
 
 void ml_model_copy_params(Mod dst, Mod src) {

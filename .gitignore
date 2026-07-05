@@ -1,8 +1,6 @@
-/ml
-/model.bin
-/train_data.csv
-/test
-/train
-/mnist.png
-/train_visualizer
+/build/
+/train/
+/test/
+/tools/img2bin
+/tools/stb_image.h
 /.clangd

@@ -132,7 +132,7 @@ void render_model(Mod m, Mat in, Color *pixels, int render_size) {
 int main(void) {
   srand(time(0));
 
-  Mat td = ml_load_td("train_data.csv");
+  Mat td = ml_data_load_csv("train_data.csv");
   if (td.es == NULL) {
     LOG_ERROR("failed to load training data");
     return 1;
