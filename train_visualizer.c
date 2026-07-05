@@ -139,7 +139,7 @@ int main(void) {
   }
 
   size_t layer[] = {2, 28, 28, 1};
-  Act acts[] = {ML_SIGMOID, ML_SIGMOID, ML_SIGMOID};
+  Act acts[] = {ML_GELU, ML_SWISH, ML_SIGMOID};
   size_t batch_count = 28;
   TrainConfig train_config = {
     .rate = 1.f,

@@ -113,7 +113,11 @@ float ReLUf(float x);                                                          /
 float dReLUf(float x);                                                         // derivative of ReLU
 float LReLUf(float x);                                                         // leaky ReLU activation (alpha=0.01)
 float dLReLUf(float x);                                                        // derivative of leaky ReLU
+float GeLUf(float x);                                                          // GeLU activation
+float dGeLUf(float x);                                                         // derivative of GeLU
 float dtanhf(float x);                                                         // derivative of tanh
+float swishf(float x);                                                         // swish activation
+float dswishf(float x);                                                        // derivative of swish
 
 Mat ml_mat_alloc(size_t rows, size_t cols, size_t stride);                     // allocate matrix, returns {0} on failure
 void ml_mat_free(Mat *m);                                                      // free matrix
@@ -216,7 +220,7 @@ void log_msg(
       level_name = "ERROR";
       break;
     default:
-      level_name = "INVALIDLEVEL";
+      level_name = "INVALID LEVEL";
   }
 
   fprintf(stderr, "[%s] %s:%d:%s ", level_name, file, line, func_name);
@@ -234,6 +238,8 @@ Act ML_SIGMOID = {.f = sigmoidf, .df = dsigmoidf};
 Act ML_RELU = {.f = ReLUf, .df = dReLUf};
 Act ML_LRELU = {.f = LReLUf, .df = dLReLUf};
 Act ML_TANH = {.f = tanhf, .df = dtanhf};
+Act ML_GELU = {.f = GeLUf, .df = dGeLUf};
+Act ML_SWISH = {.f = swishf, .df = dswishf};
 
 float rand_float(void) {
   return (float)rand() / (float)RAND_MAX;
@@ -244,7 +250,8 @@ float sigmoidf(float x) {
 }
 
 float dsigmoidf(float x) {
-  return sigmoidf(x) * (1 - sigmoidf(x));
+  float s = 1.f / (expf(-x) + 1.f);
+  return s * (1.f - s);
 }
 
 float ReLUf(float x) {
@@ -271,8 +278,52 @@ float dLReLUf(float x) {
   return 1.f;
 }
 
+float GeLUf(float x) {
+  const float sqrt_2_over_pi = 0.7978845608028654f;
+  return 0.5f * x * (1 + tanhf(sqrt_2_over_pi * (x + 0.044715f * x * x * x)));
+}
+
+float swishf(float x) {
+  float s = 1.f / (expf(-x) + 1.f);
+  return x * s;
+}
+
+float dswishf(float x) {
+  float s = 1.f / (expf(-x) + 1.f);
+  return s + x * s * (1.f - s);
+}
+
 float dtanhf(float x) {
   return 1 - (tanhf(x) * tanhf(x));
+}
+
+float dGeLUf(float x) {
+  const float sqrt_2_over_pi = 0.7978845608028654f;
+  const float u = sqrt_2_over_pi * (x + 0.044715f * x * x * x);
+  const float tanhu = tanhf(u);
+  return 0.5f * (1.f + tanhu) +
+         0.5f * x * (1.f - tanhu * tanhu) * sqrt_2_over_pi * (1 + 3 * 0.044715f * x * x);
+}
+
+int softmaxf(Mat dst, Mat src) {
+  if(dst.es == NULL || src .es == NULL){
+    LOG_ERROR("dst/src is NULL");
+  }
+  for (size_t i = 0; i < src.rows; ++i) {
+    float max = MAT_AT(src, i, 0);
+    for (size_t j = 0; j < src.cols; ++j) {
+      max = max > MAT_AT(src, i, j) ? max : MAT_AT(src, i, j);
+    }
+    float sum = 0.f;
+    for (size_t j = 0; j < src.cols; ++j) {
+      sum += expf(MAT_AT(src, i, j) - max);
+    }
+
+    for (size_t j = 0; j < src.cols; ++j) {
+      MAT_AT(dst, i, j) = expf(MAT_AT(src, i, j) - max) / sum;
+    }
+  }
+  return 0;
 }
 
 Mat ml_mat_alloc(size_t rows, size_t cols, size_t stride) {
